@@ -142,25 +142,30 @@ router.get("/hunter/stream", (req: Request, res: Response): void => {
 });
 
 router.get("/discoveries", async (req, res): Promise<void> => {
-  const limit = Math.min(Number(req.query.limit ?? 100), 500);
+  const limit = Math.min(Number(req.query.limit ?? 100), 2000);
   const offset = Math.max(0, Number(req.query.offset ?? 0));
   const minScore = Number(req.query.minScore ?? 0);
   const category =
     typeof req.query.category === "string" && req.query.category !== "all"
       ? req.query.category
       : null;
+  const strategy =
+    typeof req.query.strategy === "string" && req.query.strategy !== "all"
+      ? req.query.strategy
+      : null;
   const lengthFilter =
     typeof req.query.length === "string" ? Number(req.query.length) : null;
 
   const conds: ReturnType<typeof gte>[] = [gte(discoveriesTable.valueScore, String(minScore))];
   if (category) conds.push(eq(discoveriesTable.category, category));
+  if (strategy) conds.push(eq(discoveriesTable.strategy, strategy));
   if (lengthFilter && lengthFilter >= 5 && lengthFilter <= 7) {
     conds.push(eq(discoveriesTable.length, lengthFilter));
   }
 
   const where = conds.length === 1 ? conds[0] : and(...conds);
 
-  const cacheKey = `${minScore}|${category ?? ""}|${lengthFilter ?? ""}`;
+  const cacheKey = `${minScore}|${category ?? ""}|${strategy ?? ""}|${lengthFilter ?? ""}`;
 
   const [rows, total] = await Promise.all([
     db

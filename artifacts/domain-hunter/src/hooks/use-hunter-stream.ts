@@ -211,6 +211,7 @@ export async function fetchDiscoveries(params: {
   offset?: number;
   minScore?: number;
   category?: string;
+  strategy?: string | null;
   length?: number | null;
 }): Promise<DiscoveriesResponse> {
   const qs = new URLSearchParams();
@@ -218,6 +219,7 @@ export async function fetchDiscoveries(params: {
   if (params.offset != null && params.offset > 0) qs.set("offset", String(params.offset));
   if (params.minScore != null) qs.set("minScore", String(params.minScore));
   if (params.category && params.category !== "all") qs.set("category", params.category);
+  if (params.strategy && params.strategy !== "all") qs.set("strategy", params.strategy);
   if (params.length != null) qs.set("length", String(params.length));
   const res = await fetch(`${API_BASE}/discoveries?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);

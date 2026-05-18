@@ -6,14 +6,18 @@ import {
   BellRing,
   CheckCircle2,
   ChevronDown,
+  ChevronUp,
   Copy,
   Cpu,
   Database,
   Download,
   ExternalLink,
+  Eye,
   Flame,
   Gauge,
   Gem,
+  LayoutGrid,
+  List,
   Newspaper,
   Pause,
   Play,
@@ -23,6 +27,7 @@ import {
   Sparkles,
   TrendingUp,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -85,7 +90,8 @@ const STRATEGY_LABEL: Record<string, string> = {
   short_suffix: "Short Suffix",
 };
 
-const PAGE_SIZE = 60;
+const PAGE_SIZE = 200;
+const CSV_EXPORT_LIMIT = 2000;
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
@@ -151,6 +157,54 @@ function CopyButton({ text }: { text: string }) {
         <><Copy className="h-3 w-3" /> copy</>
       )}
     </button>
+  );
+}
+
+function CompactRow({ d, onExpand }: { d: Discovery; onExpand: () => void }) {
+  const godaddyUrl = `https://www.godaddy.com/domainsearch/find?domainToCheck=${encodeURIComponent(d.fqdn)}`;
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-md border bg-gradient-to-r px-3 py-2 transition-colors hover:border-primary/40",
+        scoreBg(d.valueScore),
+      )}
+    >
+      <div className={cn("shrink-0 w-10 text-right font-mono font-bold tabular-nums text-base", scoreColor(d.valueScore))}>
+        {d.valueScore.toFixed(0)}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-1.5">
+          <span className="font-mono text-sm font-semibold truncate">{d.name}</span>
+          <span className="text-[11px] text-muted-foreground">.{d.tld}</span>
+          <span
+            className={cn(
+              "hidden sm:inline-flex items-center rounded px-1 py-px text-[9px] uppercase tracking-wider border",
+              CATEGORY_COLOR[d.category] ?? "border-border text-muted-foreground",
+            )}
+          >
+            {CATEGORY_LABEL[d.category] ?? d.category}
+          </span>
+          <span className="hidden md:inline text-[10px] text-muted-foreground font-mono">{d.pattern}</span>
+          <span className="hidden md:inline text-[10px] text-muted-foreground">{d.length}L</span>
+        </div>
+      </div>
+      <button
+        onClick={onExpand}
+        title="View full details"
+        className="shrink-0 rounded border border-border/60 p-1 text-muted-foreground hover:border-primary/40 hover:text-primary"
+      >
+        <Eye className="h-3.5 w-3.5" />
+      </button>
+      <CopyButton text={d.fqdn} />
+      <a
+        href={godaddyUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="shrink-0 inline-flex items-center gap-1 rounded bg-primary/90 px-2 py-1 text-[10px] font-medium text-primary-foreground hover:bg-primary"
+      >
+        Register <ExternalLink className="h-3 w-3" />
+      </a>
+    </div>
   );
 }
 
@@ -420,20 +474,28 @@ function NewsIntelligenceStrip({
   );
 }
 
+function csvSafe(s: string): string {
+  if (s == null) return "";
+  const v = String(s);
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
+}
+
 function exportCsv(items: Discovery[]) {
-  const header = "name,fqdn,score,length,pattern,category,strategy,memorability,radio_test,discovered_at,rdap_status,register_url";
+  const header = "name,fqdn,score,length,pattern,category,strategy,memorability,radio_test,discovered_at,rationale,rdap_status,register_url";
   const rows = items.map((d) =>
     [
-      d.name,
-      d.fqdn,
+      csvSafe(d.name),
+      csvSafe(d.fqdn),
       d.valueScore.toFixed(1),
       d.length,
-      d.pattern,
-      d.category,
-      d.strategy,
+      csvSafe(d.pattern),
+      csvSafe(d.category),
+      csvSafe(d.strategy),
       d.memorability,
       d.radioTest ? "pass" : "borderline",
-      d.discoveredAt,
+      csvSafe(d.discoveredAt),
+      csvSafe(d.rationale ?? ""),
       "RDAP-verified free",
       `https://www.godaddy.com/domainsearch/find?domainToCheck=${d.fqdn}`,
     ].join(",")
@@ -443,7 +505,7 @@ function exportCsv(items: Discovery[]) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `diamonds-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `diamonds-${new Date().toISOString().slice(0, 10)}-${items.length}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -452,12 +514,16 @@ export function Live() {
   const { events, state, connected } = useHunterStream();
   const [minScore, setMinScore] = useState(70);
   const [category, setCategory] = useState("all");
+  const [strategyFilter, setStrategyFilter] = useState<string | null>(null);
   const [lengthFilter, setLengthFilter] = useState<number | null>(null);
   const [offset, setOffset] = useState(0);
   const [allItems, setAllItems] = useState<Discovery[]>([]);
+  const [viewMode, setViewMode] = useState<"compact" | "detailed">("compact");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
   const queryClient = useQueryClient();
-  const filtersKey = `${minScore}-${category}-${String(lengthFilter)}`;
+  const filtersKey = `${minScore}-${category}-${strategyFilter ?? ""}-${String(lengthFilter)}`;
   const prevFiltersKeyRef = useRef(filtersKey);
 
   // Reset pagination when filters change
@@ -470,9 +536,16 @@ export function Live() {
   }, [filtersKey]);
 
   const discoveriesQuery = useQuery({
-    queryKey: ["discoveries", minScore, category, lengthFilter, offset],
+    queryKey: ["discoveries", minScore, category, strategyFilter, lengthFilter, offset],
     queryFn: () =>
-      fetchDiscoveries({ limit: PAGE_SIZE, offset, minScore, category, length: lengthFilter }),
+      fetchDiscoveries({
+        limit: PAGE_SIZE,
+        offset,
+        minScore,
+        category,
+        strategy: strategyFilter,
+        length: lengthFilter,
+      }),
     refetchInterval: offset === 0 ? 4000 : false,
   });
 
@@ -493,9 +566,11 @@ export function Live() {
   // Invalidate on new discoveries
   useEffect(() => {
     if (events[0]?.kind === "discovery") {
-      void queryClient.invalidateQueries({ queryKey: ["discoveries", minScore, category, lengthFilter, 0] });
+      void queryClient.invalidateQueries({
+        queryKey: ["discoveries", minScore, category, strategyFilter, lengthFilter, 0],
+      });
     }
-  }, [events, queryClient, minScore, category, lengthFilter]);
+  }, [events, queryClient, minScore, category, strategyFilter, lengthFilter]);
 
   const running = state?.running ?? false;
   const totalEvaluated = state?.totalEvaluated ?? 0;
@@ -539,9 +614,24 @@ export function Live() {
     setOffset((prev) => prev + PAGE_SIZE);
   }, []);
 
-  const handleExport = useCallback(() => {
-    exportCsv(allItems);
-  }, [allItems]);
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    try {
+      const resp = await fetchDiscoveries({
+        limit: CSV_EXPORT_LIMIT,
+        offset: 0,
+        minScore,
+        category,
+        strategy: strategyFilter,
+        length: lengthFilter,
+      });
+      exportCsv(resp.items);
+    } catch {
+      exportCsv(allItems);
+    } finally {
+      setExporting(false);
+    }
+  }, [allItems, minScore, category, strategyFilter, lengthFilter]);
 
   const handleTelegramTest = useCallback(async () => {
     setTelegramStatus("testing");
@@ -736,11 +826,40 @@ export function Live() {
             </div>
             {/* Export */}
             {allItems.length > 0 && (
-              <Button size="sm" variant="outline" onClick={handleExport}
+              <Button size="sm" variant="outline" onClick={() => void handleExport()}
+                disabled={exporting}
                 className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/10 text-[11px] h-7 px-2">
-                <Download className="h-3 w-3 mr-1" /> Export CSV
+                <Download className="h-3 w-3 mr-1" />
+                {exporting ? "Exporting…" : `Export CSV · top ${Math.min(CSV_EXPORT_LIMIT, totalInDb).toLocaleString()}`}
               </Button>
             )}
+            {/* View toggle */}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setViewMode("compact")}
+                title="Compact list (name + score)"
+                className={cn(
+                  "rounded px-1.5 py-1 text-[11px] border transition-colors",
+                  viewMode === "compact"
+                    ? "border-primary/60 bg-primary/20 text-primary"
+                    : "border-border/50 text-muted-foreground hover:border-border hover:text-foreground",
+                )}
+              >
+                <List className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => setViewMode("detailed")}
+                title="Detailed cards"
+                className={cn(
+                  "rounded px-1.5 py-1 text-[11px] border transition-colors",
+                  viewMode === "detailed"
+                    ? "border-primary/60 bg-primary/20 text-primary"
+                    : "border-border/50 text-muted-foreground hover:border-border hover:text-foreground",
+                )}
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -762,6 +881,16 @@ export function Live() {
               {cat.label}
             </button>
           ))}
+          {strategyFilter && (
+            <button
+              onClick={() => { setStrategyFilter(null); setOffset(0); setAllItems([]); }}
+              className="ml-auto inline-flex items-center gap-1 rounded-full border border-amber-400/50 bg-amber-500/10 px-3 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+              title="Clear strategy filter"
+            >
+              Strategy: {STRATEGY_LABEL[strategyFilter] ?? strategyFilter}
+              <X className="h-3 w-3" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -784,9 +913,17 @@ export function Live() {
           )}
           {allItems.length > 0 && (
             <>
-              <div className="grid gap-4 grid-cols-1 xl:grid-cols-2">
-                {allItems.map((d) => <DiamondCard key={d.id} d={d} />)}
-              </div>
+              {viewMode === "detailed" ? (
+                <div className="grid gap-4 grid-cols-1 xl:grid-cols-2">
+                  {allItems.map((d) => <DiamondCard key={d.id} d={d} />)}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {allItems.map((d) => (
+                    <CompactRow key={d.id} d={d} onExpand={() => setExpandedId(d.id)} />
+                  ))}
+                </div>
+              )}
               {hasMore && (
                 <div className="mt-6 flex justify-center">
                   <Button
@@ -857,19 +994,66 @@ export function Live() {
                 {Object.entries(state.perStrategy)
                   .filter(([, v]) => v.checked > 0)
                   .sort(([, a], [, b]) => b.diamonds - a.diamonds)
-                  .map(([key, v]) => (
-                    <div key={key} className="px-4 py-2 text-[11px] flex items-center justify-between gap-2">
-                      <span className="text-muted-foreground truncate">{STRATEGY_LABEL[key] ?? key}</span>
-                      <span className="font-mono text-emerald-300 shrink-0">
-                        {v.diamonds.toLocaleString()} 💎
-                      </span>
-                    </div>
-                  ))}
+                  .map(([key, v]) => {
+                    const active = strategyFilter === key;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          const next = active ? null : key;
+                          setStrategyFilter(next);
+                          setOffset(0);
+                          setAllItems([]);
+                        }}
+                        title={active ? "Click to clear filter" : `Filter vault to ${STRATEGY_LABEL[key] ?? key}`}
+                        className={cn(
+                          "w-full px-4 py-2 text-[11px] flex items-center justify-between gap-2 text-left transition-colors",
+                          active
+                            ? "bg-primary/15 text-primary"
+                            : "hover:bg-card/60",
+                        )}
+                      >
+                        <span className={cn("truncate", active ? "text-primary font-medium" : "text-muted-foreground")}>
+                          {STRATEGY_LABEL[key] ?? key}
+                        </span>
+                        <span className="font-mono text-emerald-300 shrink-0">
+                          {v.diamonds.toLocaleString()} 💎
+                        </span>
+                      </button>
+                    );
+                  })}
               </div>
             </div>
           )}
         </aside>
       </div>
+
+      {/* Expand modal */}
+      {expandedId !== null && (() => {
+        const d = allItems.find((x) => x.id === expandedId);
+        if (!d) return null;
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-background/80 backdrop-blur-sm p-4"
+            onClick={() => setExpandedId(null)}
+          >
+            <div
+              className="relative my-12 w-full max-w-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => setExpandedId(null)}
+                className="absolute -top-3 -right-3 z-10 rounded-full border border-border bg-background p-1.5 text-muted-foreground hover:text-foreground"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <DiamondCard d={d} />
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
