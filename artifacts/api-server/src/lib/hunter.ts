@@ -130,7 +130,19 @@ class Hunter extends EventEmitter {
   // PERMANENT search history — every fqdn ever DNS-checked.
   // Loaded from dns_cache on startup, kept in sync as we run.
   private everSearched = new Set<string>();
+  // Mirror set of just the bare label (no TLD) used as the generator's
+  // exclude-set. Maintained in lock-step with `everSearched` so we don't have
+  // to rebuild a fresh Set every cycle (that was a multi-MB-per-cycle
+  // allocation that pushed the heap past 256 MB on Render).
+  private everSearchedBare = new Set<string>();
   private historyLoaded = false;
+
+  private trackSearched(fqdn: string) {
+    if (this.everSearched.has(fqdn)) return;
+    this.everSearched.add(fqdn);
+    const dot = fqdn.indexOf(".");
+    this.everSearchedBare.add(dot > 0 ? fqdn.slice(0, dot) : fqdn);
+  }
 
   // Throughput tracking — checks per second over a 5s sliding window.
   private throughputWindow: { ts: number; checks: number }[] = [];
@@ -152,7 +164,7 @@ class Hunter extends EventEmitter {
     if (this.historyLoaded) return;
     try {
       const rows = await db.select({ fqdn: dnsCacheTable.fqdn }).from(dnsCacheTable);
-      for (const r of rows) this.everSearched.add(r.fqdn);
+      for (const r of rows) this.trackSearched(r.fqdn);
       this.state.everSearchedSize = this.everSearched.size;
       this.historyLoaded = true;
       logger.info(
@@ -403,14 +415,10 @@ class Hunter extends EventEmitter {
     const seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
     const requested = this.state.batchSize;
 
-    // Build a fqdn-set view of everSearched and pass to generator so we never
-    // even produce a name we've previously seen (zero-duplicate guarantee).
-    const everSearchedNames = new Set<string>();
-    for (const fqdn of this.everSearched) {
-      const dot = fqdn.indexOf(".");
-      everSearchedNames.add(dot > 0 ? fqdn.slice(0, dot) : fqdn);
-    }
-
+    // Reuse the pre-built bare-name view of everSearched (maintained in
+    // trackSearched) so we don't rebuild a fresh Set of every historical name
+    // on every single cycle — that was the primary heap pressure on small
+    // Render instances.
     // Generate ~2K candidates internally (sustained ~hundreds of thousands /sec
     // when summed across cycles). Bigger numbers blocked the event loop.
     const overGen = Math.max(requested * 8, 2000);
@@ -421,7 +429,7 @@ class Hunter extends EventEmitter {
       trends,
       overGen,
       seed,
-      everSearchedNames,
+      this.everSearchedBare,
       3,
     );
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
@@ -519,7 +527,7 @@ class Hunter extends EventEmitter {
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
     this.bumpStat("perStrategy", strategy, "checked", results.length);
-    this.bumpStat("perCategory", category, "checked", results.length);
+    this.bumpStat("perCategory", ctrackSearcheed", results.length);
 
     // Bulk persist to dns_cache.
     try {
