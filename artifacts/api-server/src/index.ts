@@ -6,6 +6,17 @@ import { workerRegistry } from "./lib/workers/registry";
 import { db, discoveriesTable } from "@workspace/db";
 import { desc } from "drizzle-orm";
 
+// Keep the process alive when background loops (hunter / news ingest /
+// workers) throw. Node 24 terminates the process on unhandled rejections by
+// default, which was causing the server to die silently shortly after boot
+// and surface as a persistent 502 from the edge.
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "unhandledRejection");
+});
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "uncaughtException");
+});
+
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
