@@ -31,7 +31,7 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
+const server = app.listen(port, "0.0.0.0", (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
@@ -72,3 +72,9 @@ app.listen(port, (err) => {
       .catch(() => {/* ignore */});
   }, 500);
 });
+
+// Render's proxy keeps connections alive; Node's default 5s keep-alive can
+// race the proxy and surface as intermittent 502/Connection-reset errors.
+// Bumping these per Render's Node.js troubleshooting guidance.
+server.keepAliveTimeout = 120_000;
+server.headersTimeout = 120_000;

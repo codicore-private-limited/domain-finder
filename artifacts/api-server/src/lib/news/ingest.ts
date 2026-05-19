@@ -39,12 +39,19 @@ class NewsIngest extends EventEmitter {
     return { ...this.state, running: this.running };
   }
 
+  private safeRunOnce() {
+    this.runOnce().catch((err) => {
+      logger.error({ err }, "News ingest runOnce failed");
+    });
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
-    // Initial run immediately, then on interval.
-    void this.runOnce();
-    this.timer = setInterval(() => void this.runOnce(), this.intervalMs);
+    // Initial run immediately, then on interval. Errors must never escape
+    // (would become unhandled rejections and crash the process on Node 24).
+    this.safeRunOnce();
+    this.timer = setInterval(() => this.safeRunOnce(), this.intervalMs);
     logger.info({ intervalMs: this.intervalMs }, "News ingest started");
   }
 
