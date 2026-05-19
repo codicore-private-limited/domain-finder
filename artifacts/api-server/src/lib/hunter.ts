@@ -523,11 +523,11 @@ class Hunter extends EventEmitter {
     this.recordThroughput(fqdns.length);
 
     // Update history immediately for ALL results.
-    for (const r of results) this.everSearched.add(r.fqdn);
+    for (const r of results) this.trackSearched(r.fqdn);
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
     this.bumpStat("perStrategy", strategy, "checked", results.length);
-    this.bumpStat("perCategory", ctrackSearcheed", results.length);
+    this.bumpStat("perCategory", category, "checked", results.length);
 
     // Bulk persist to dns_cache.
     try {
