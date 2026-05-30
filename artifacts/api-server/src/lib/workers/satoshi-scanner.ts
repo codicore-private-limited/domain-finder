@@ -1,16 +1,26 @@
-import { BaseWorker, type RunResult } from "./base-worker";
+import { BaseWorker, type DiscoveredOpportunity, type RunResult } from "./base-worker";
+import { safeJson } from "./_http";
+
+interface MempoolBlock {
+  id: string;
+  height: number;
+  timestamp: number;
+  tx_count: number;
+}
 
 /**
- * Worker 9 — Satoshi Scanner (rare sat hunter).
+ * Worker 9 — Rare Satoshi Scanner.
  *
- * Pipeline (read-only — does not move any funds):
- *   1. Pull recent UTXOs from a configured xpub or watch-only wallet.
- *   2. For each UTXO, run an ordinal/rarity classifier (uncommon, rare,
- *      epic, legendary, mythic — by block height, halving, palindrome,
- *      vintage, etc.).
- *   3. Cross-reference Magic Eden / OrdinalsBot floor prices for that
- *      rarity bucket.
- *   4. Emit opportunity rows so the user can manually inscribe + list.
+ * Without a configured xpub we can't enumerate the user's UTXOs, but the
+ * useful, generic signal we CAN compute is:
+ *   - For each new block produced, classify the block height for rarity
+ *     properties (block 1, halving block, palindromic height, vintage
+ *     <100k, etc.) — this matches the Ord rarity heuristics.
+ *   - Emit an opportunity row per "interesting" recent block so the user
+ *     can investigate inscribing the first sat of that block if they have
+ *     a UTXO touching it.
+ *
+ * Read-only — does not move funds.
  */
 export class SatoshiScannerWorker extends BaseWorker {
   constructor() {
@@ -21,13 +31,59 @@ export class SatoshiScannerWorker extends BaseWorker {
       riskLevel: "low",
       legalStatus: "clean",
       description:
-        "Scans the user's watch-only BTC UTXOs for rare sats and prices them against current floors.",
+        "Watches new BTC blocks and tags those whose first sat has rare ordinal properties.",
       intervalMs: 60 * 60 * 1000,
-      implemented: false,
+      implemented: true,
     });
   }
 
+  private isPalindrome(n: number): boolean {
+    const s = n.toString();
+    return s === s.split("").reverse().join("");
+  }
+
+  private rarityOf(height: number): { rarity: string; score: number } {
+    if (height === 0) return { rarity: "mythic", score: 100 };
+    if (height % 210_000 === 0) return { rarity: "epic", score: 92 }; // halving
+    if (height % 2016 === 0) return { rarity: "rare", score: 80 };   // difficulty epoch
+    if (this.isPalindrome(height)) return { rarity: "uncommon", score: 70 };
+    if (height < 100_000) return { rarity: "vintage", score: 65 };
+    if (height % 1000 === 0) return { rarity: "round", score: 55 };
+    return { rarity: "common", score: 0 };
+  }
+
   protected async runOnce(): Promise<RunResult> {
-    throw new Error("SatoshiScannerWorker.runOnce not implemented");
+    const blocks =
+      (await safeJson<MempoolBlock[]>("https://mempool.space/api/v1/blocks")) ?? [];
+    const items: DiscoveredOpportunity[] = [];
+
+    for (const b of blocks) {
+      const r = this.rarityOf(b.height);
+      if (r.score === 0) continue;
+      items.push({
+        externalKey: `block:${b.height}`,
+        kind: "rare_block",
+        score: r.score,
+        confidence: 50,
+        payload: {
+          blockHeight: b.height,
+          blockHash: b.id,
+          minedAt: new Date(b.timestamp * 1000).toISOString(),
+          txCount: b.tx_count,
+          rarity: r.rarity,
+          mempoolUrl: `https://mempool.space/block/${b.id}`,
+          ordUrl: `https://ordinals.com/sat/${b.height * 50 * 100_000_000}`,
+          note:
+            "If you control any UTXO whose ancestor includes the first sat of this block, consider inscribing.",
+        },
+        rationale: `Block ${b.height} — ${r.rarity} sat (${r.score}/100).`,
+      });
+    }
+
+    const inserted = await this.persistOpportunities(items);
+    return {
+      opportunitiesFound: inserted,
+      stats: { blocksScanned: blocks.length, rareBlocks: items.length, inserted },
+    };
   }
 }

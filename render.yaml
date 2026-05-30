@@ -1,0 +1,58 @@
+# Render Blueprint for the domain-finder monorepo.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Why every line matters:
+# - Render sets NODE_ENV=production by default, which makes `pnpm install`
+#   skip devDependencies. Our build needs vite/esbuild/drizzle-kit/tsc
+#   (all devDeps), so we force `--prod=false` AND set NPM_CONFIG_PRODUCTION=false
+#   so devDeps remain installed at runtime too (the start script invokes
+#   `drizzle-kit push`).
+# - We pin Node to 24 to match the workspace setting in pnpm-workspace.yaml.
+# - We pin pnpm via corepack so the lockfile is honored.
+
+services:
+  - type: web
+    name: domain-finder
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/healthz
+    buildCommand: |
+      corepack enable
+      corepack prepare pnpm@latest --activate
+      pnpm install --frozen-lockfile --prod=false
+      pnpm run build
+    startCommand: pnpm run start
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      # Keep devDependencies around at runtime so `drizzle-kit push`
+      # (invoked by the root `start` script) keeps working.
+      - key: NPM_CONFIG_PRODUCTION
+        value: "false"
+      - key: PNPM_VERSION
+        value: "10"
+      # Render injects PORT automatically; the server reads it.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: domain-finder-db
+          property: connectionString
+      # Set these in the Render dashboard (do NOT commit secrets):
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GODADDY_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+databases:
+  - name: domain-finder-db
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
