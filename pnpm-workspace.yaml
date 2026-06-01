@@ -159,6 +159,3 @@ overrides:
 
 allowBuilds:
   esbuild: true
-
-allowBuilds:
-  esbuild: true
