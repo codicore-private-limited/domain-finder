@@ -1,4 +1,9 @@
 import { isVowel, hasAwkwardCluster, patternOf } from "./scoring";
+import {
+  ADJ_SHORT, VERB_SHORT, NATURE_W1,
+  NOUN_BIZ, NOUN_TECH, NOUN_FIN, NOUN_HEALTH,
+  detectRealWords, isPerfectTwoWord,
+} from "./wordlists";
 
 const BLOCKED_FRAGMENTS = [
   "fuck", "fuk", "fuq", "shit", "cunt", "dick", "cock", "pussy", "bitch",
@@ -623,7 +628,116 @@ export function generatePronounceableWord(count: number, seed = Date.now()): str
   return Array.from(out);
 }
 
+// ─────────────────────────────────────────────
+// TWO-WORD REAL — meaningful 2-word .com domains from real dictionary words
+// e.g. fastpay, cleanair, deepmind, goldmine, boldmove
+// These are the HIGH-VALUE domains that sell for $10K-$500K+
+// ─────────────────────────────────────────────
+
+// All W1 pools (adjectives, verbs, nature words)
+const REAL_W1_POOLS = [ADJ_SHORT, VERB_SHORT, NATURE_W1];
+// All W2 pools (business, tech, finance, health nouns)
+const REAL_W2_POOLS = [NOUN_BIZ, NOUN_TECH, NOUN_FIN, NOUN_HEALTH];
+
+export function generateTwoWordReal(
+  count: number,
+  seed = Date.now(),
+  maxLen = 12,
+  minLen = 6,
+): string[] {
+  const rng = makeRng(seed);
+  const out = new Set<string>();
+  let attempts = 0;
+  while (out.size < count && attempts < count * 80) {
+    attempts++;
+    const w1Pool = pick(REAL_W1_POOLS, rng);
+    const w2Pool = pick(REAL_W2_POOLS, rng);
+    const w1 = pick(w1Pool, rng);
+    const w2 = pick(w2Pool, rng);
+    if (w1 === w2) continue;
+    const fused = (w1 + w2).toLowerCase();
+    if (
+      fused.length >= minLen &&
+      fused.length <= maxLen &&
+      /^[a-z]+$/.test(fused) &&
+      !hasAwkwardCluster(fused) &&
+      isClean(fused)
+    ) {
+      out.add(fused);
+    }
+  }
+  return Array.from(out);
+}
+
+// ─────────────────────────────────────────────
+// NEWS-DRIVEN 2-WORD — combines trending news keywords with real words
+// e.g. if "fusion" is trending → fusionlab, fusionpay, deepfusion
+// ─────────────────────────────────────────────
+export function generateNewsDriven(
+  trendKeywords: string[],
+  count: number,
+  seed = Date.now(),
+): string[] {
+  const rng = makeRng(seed);
+  const out = new Set<string>();
+  // Filter trend keywords to usable ones (3-7 chars, alpha only)
+  const usable = trendKeywords
+    .map((k) => k.toLowerCase().replace(/[^a-z]/g, ""))
+    .filter((k) => k.length >= 3 && k.length <= 7);
+  if (usable.length === 0) return [];
+
+  // Power suffixes that work with any keyword
+  const powerSuffixes = [
+    "hub", "lab", "pay", "box", "kit", "net", "app",
+    "now", "go", "pro", "ai", "io", "hq", "co",
+    "flow", "mind", "link", "base", "cast", "spot",
+    "zone", "path", "gate", "port", "view", "wire",
+    "grid", "sync", "wave", "core", "edge", "data",
+    "fund", "deal", "sale", "mart", "shop", "club",
+  ];
+  // Power prefixes
+  const powerPrefixes = [
+    "get", "my", "go", "try", "use", "hey",
+    "top", "one", "all", "any", "new", "pro",
+    "big", "fast", "open", "deep", "true", "real",
+    "smart", "bold", "pure", "free", "safe", "next",
+  ];
+
+  let attempts = 0;
+  while (out.size < count && attempts < count * 60) {
+    attempts++;
+    const kw = pick(usable, rng);
+    const r = rng();
+    let candidate: string;
+    if (r < 0.5) {
+      // keyword + suffix
+      candidate = kw + pick(powerSuffixes, rng);
+    } else if (r < 0.85) {
+      // prefix + keyword
+      candidate = pick(powerPrefixes, rng) + kw;
+    } else {
+      // keyword + keyword
+      const kw2 = pick(usable, rng);
+      if (kw === kw2) continue;
+      candidate = kw + kw2;
+    }
+    candidate = candidate.toLowerCase();
+    if (
+      candidate.length >= 6 &&
+      candidate.length <= 12 &&
+      /^[a-z]+$/.test(candidate) &&
+      !hasAwkwardCluster(candidate) &&
+      isClean(candidate)
+    ) {
+      out.add(candidate);
+    }
+  }
+  return Array.from(out);
+}
+
 export const ALL_STRATEGIES = [
+  "two_word_real",
+  "news_driven",
   "brandable_cvcv",
   "future_suffix",
   "dictionary_hack",
@@ -637,10 +751,17 @@ export const ALL_STRATEGIES = [
   "short_suffix",
 ] as const;
 
-// Enforce: only 5-7 letter, lowercase a-z, vulgarity-clean, and not previously seen.
-function passesGate(name: string, exclude?: Set<string>): boolean {
+// Length gate varies by strategy type.
+// - Legacy brandable strategies: 5-7 letters
+// - Two-word real / news-driven: 6-12 letters (real 2-word domains are longer)
+const TWO_WORD_STRATEGIES = new Set(["two_word_real", "news_driven"]);
+
+function passesGate(name: string, exclude?: Set<string>, strategy?: string): boolean {
   if (!name) return false;
-  if (name.length < 5 || name.length > 7) return false;
+  const isTwoWord = strategy ? TWO_WORD_STRATEGIES.has(strategy) : false;
+  const minLen = isTwoWord ? 6 : 5;
+  const maxLen = isTwoWord ? 12 : 7;
+  if (name.length < minLen || name.length > maxLen) return false;
   if (!/^[a-z]+$/.test(name)) return false;
   if (!isClean(name)) return false;
   if (exclude && exclude.has(name)) return false;
@@ -658,6 +779,12 @@ export function generate(
   const oversample = Math.max(count * 12, 1500);
   let raw: string[];
   switch (strategy) {
+    case "two_word_real":
+      raw = generateTwoWordReal(oversample, seed);
+      break;
+    case "news_driven":
+      raw = generateNewsDriven(trendKeywords, oversample, seed);
+      break;
     case "brandable_cvcv":
       raw = generateBrandableCVCV(oversample, seed);
       break;
@@ -698,7 +825,7 @@ export function generate(
   const seenLocal = new Set<string>();
   for (const name of raw) {
     if (seenLocal.has(name)) continue;
-    if (!passesGate(name, excludeNames)) continue;
+    if (!passesGate(name, excludeNames, strategy)) continue;
     seenLocal.add(name);
     fresh.push(name);
     if (fresh.length >= count) break;

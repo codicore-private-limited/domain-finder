@@ -1,0 +1,115 @@
+# Deploy to Azure App Service using GitHub Actions.
+# This bypasses Azure Deployment Center's GitHub integration entirely,
+# avoiding the "Cannot find SourceControlToken" bug.
+#
+# SETUP (one-time):
+# 1. Go to Azure Portal → your App Service → Settings → Configuration
+#    Set these Application Settings:
+#      - WEBSITE_NODE_DEFAULT_VERSION = ~24
+#      - SCM_DO_BUILD_DURING_DEPLOYMENT = false
+#      - NPM_CONFIG_PRODUCTION = false
+#      - PORT = 8080
+#      - DATABASE_URL = <your db connection string>
+#      - GROQ_API_KEY = <your key>
+#      - GODADDY_API_KEY = <your key>
+#      - TELEGRAM_BOT_TOKEN = <your token>
+#
+# 2. Go to Azure Portal → your App Service → Settings → Configuration → General settings
+#    Set Startup Command:  node --enable-source-maps --max-old-space-size=460 artifacts/api-server/dist/index.mjs
+#
+# 3. Download Publish Profile:
+#    Azure Portal → your App Service → Overview → "Download publish profile"
+#    Copy the FULL XML content.
+#
+# 4. Add GitHub Secret:
+#    GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#    Name:  AZURE_WEBAPP_PUBLISH_PROFILE
+#    Value: paste the full XML from step 3
+#
+# 5. Update the AZURE_WEBAPP_NAME below with your Azure App Service name.
+
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AZURE_WEBAPP_NAME: codicore    # <-- Change this to your Azure App Service name
+  NODE_VERSION: "24"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prod=false
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Create deployment package
+        run: |
+          # Azure App Service expects a deployable package.
+          # We include everything needed at runtime.
+          mkdir -p deploy-package
+
+          # Copy built API server
+          cp -r artifacts/api-server/dist deploy-package/artifacts/api-server/dist
+
+          # Copy built frontend (served by the API server)
+          if [ -d "artifacts/domain-hunter/dist/public" ]; then
+            mkdir -p deploy-package/artifacts/domain-hunter/dist
+            cp -r artifacts/domain-hunter/dist/public deploy-package/artifacts/domain-hunter/dist/public
+          fi
+
+          # Copy root package.json and workspace config
+          cp package.json deploy-package/
+          cp pnpm-workspace.yaml deploy-package/
+          cp pnpm-lock.yaml deploy-package/
+
+          # Copy all package.json files for workspace resolution
+          for pkg in artifacts/*/package.json lib/*/package.json scripts/package.json; do
+            if [ -f "$pkg" ]; then
+              dir=$(dirname "$pkg")
+              mkdir -p "deploy-package/$dir"
+              cp "$pkg" "deploy-package/$dir/"
+            fi
+          done
+
+          # Copy drizzle config for db:push at startup
+          if [ -f "lib/db/drizzle.config.ts" ]; then
+            mkdir -p deploy-package/lib/db
+            cp lib/db/drizzle.config.ts deploy-package/lib/db/
+          fi
+          # Copy compiled db files
+          if [ -d "lib/db/dist" ]; then
+            cp -r lib/db/dist deploy-package/lib/db/dist
+          fi
+
+          # Install production dependencies in deploy package
+          cd deploy-package
+          corepack enable
+          pnpm install --frozen-lockfile --prod=false
+          cd ..
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: deploy-package

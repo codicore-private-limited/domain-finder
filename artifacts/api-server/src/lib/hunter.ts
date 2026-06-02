@@ -455,11 +455,15 @@ class Hunter extends EventEmitter {
     scored.sort((a, b) => b.score.valueScore - a.score.valueScore);
 
     // Strict diamond gate — only score-passing AND length-clean candidates go to DNS.
+    // Two-word strategies (two_word_real, news_driven) produce 6-12 char domains.
+    const isTwoWordStrategy = strategy === "two_word_real" || strategy === "news_driven";
+    const minLen = isTwoWordStrategy ? 6 : 5;
+    const maxLen = isTwoWordStrategy ? 12 : 7;
     const candidates = scored.filter(
       (s) =>
         s.score.valueScore >= this.state.effectiveMinScore &&
-        s.name.length >= 5 &&
-        s.name.length <= 7,
+        s.name.length >= minLen &&
+        s.name.length <= maxLen,
     );
     // Cap DNS work to top-K to keep DNS load sane (real net has limits).
     const passing = candidates.slice(0, Math.min(requested, candidates.length));

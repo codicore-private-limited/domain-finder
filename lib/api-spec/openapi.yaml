@@ -229,7 +229,7 @@ components:
 
     Strategy:
       type: string
-      enum: [brandable_cvcv, future_suffix, dictionary_hack, transliteration, four_letter]
+      enum: [brandable_cvcv, future_suffix, dictionary_hack, transliteration, four_letter, two_word_real, news_driven, two_word_brandable, pronounceable_word, prefix_root, color_tech, vowel_start, portmanteau, short_suffix]
 
     TrendKeyword:
       type: object
@@ -307,7 +307,11 @@ components:
           type: number
         radioTest:
           type: number
-      required: [length, tld, trend, phonetic, memorability, radioTest]
+        realWord:
+          type: number
+        crorePotential:
+          type: number
+      required: [length, tld, trend, phonetic, memorability, radioTest, realWord, crorePotential]
 
     DomainCandidate:
       type: object
