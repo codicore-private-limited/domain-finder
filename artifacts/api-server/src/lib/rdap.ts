@@ -7,6 +7,7 @@ export interface RdapResult {
   verdict: RdapVerdict;
   evidence: string;
   registrationDate?: string;
+  expirationDate?: string;
   status?: string[];
 }
 
@@ -56,6 +57,9 @@ export async function rdapDotComCheck(fqdn: string): Promise<RdapResult> {
       return { fqdn, verdict: "unknown", evidence: "RDAP: parse-error" };
     }
     const reg = body.events?.find((e) => e.eventAction === "registration");
+    const exp = body.events?.find(
+      (e) => e.eventAction === "expiration",
+    );
     const status = body.status ?? [];
     const date = reg?.eventDate?.slice(0, 10) ?? "?";
     const tag = status.slice(0, 2).join(",");
@@ -64,6 +68,7 @@ export async function rdapDotComCheck(fqdn: string): Promise<RdapResult> {
       verdict: "registered",
       evidence: `RDAP: registered ${date}${tag ? ` [${tag}]` : ""}`,
       registrationDate: reg?.eventDate,
+      expirationDate: exp?.eventDate,
       status,
     };
   }

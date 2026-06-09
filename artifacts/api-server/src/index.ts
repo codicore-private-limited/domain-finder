@@ -2,6 +2,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { hunter } from "./lib/hunter";
 import { newsIngest } from "./lib/news/ingest";
+import { expiringMonitor } from "./lib/news/expiring";
 import { workerRegistry } from "./lib/workers/registry";
 import { db, discoveriesTable } from "@workspace/db";
 import { desc } from "drizzle-orm";
@@ -49,12 +50,29 @@ const server = app.listen(port, "0.0.0.0", (err) => {
     // Kick off a one-shot RDAP re-verification of legacy diamonds in background.
     void hunter.runLegacyCleanup();
 
+    // One-shot quality sweep: drop legacy gibberish discoveries and refresh
+    // scores to the current real-word rating model.
+    void hunter.purgeMeaninglessDiscoveries();
+
     // Start continuous news ingestion (feeds trend signals into hunter).
     try {
       newsIngest.start();
       logger.info({}, "News ingest started");
     } catch (err) {
       logger.error({ err }, "News ingest start failed");
+    }
+
+    // Expiring/drop-catch monitor is OPT-IN only (set EXPIRING_MONITOR=1).
+    // The user prefers fresh-registration discovery over chasing expiring names,
+    // so this stays off by default. The /api/news/expiring/* routes still work
+    // for manual on-demand scans.
+    if (process.env.EXPIRING_MONITOR === "1") {
+      try {
+        expiringMonitor.start();
+        logger.info({}, "Expiring monitor started (opt-in)");
+      } catch (err) {
+        logger.error({ err }, "Expiring monitor start failed");
+      }
     }
 
     // Register all 12 Codicore workers in the DB so the /workers UI lights up.

@@ -1,18 +1,5 @@
 import { logger } from "./logger";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-
-// Circuit breaker: once Groq returns auth/quota errors, stop calling for the
-// rest of the process lifetime to avoid log spam and wasted latency.
-let groqDisabled = false;
-let groqDisabledReason = "";
-function disableGroq(reason: string) {
-  if (!groqDisabled) {
-    groqDisabled = true;
-    groqDisabledReason = reason;
-    logger.warn({ reason }, "Groq disabled for this process — using fallback (news + static)");
-  }
-}
+import { chatJSON, llmAvailable } from "./llm";
 
 const STATIC_FALLBACK: Record<
   string,
@@ -84,11 +71,8 @@ export interface TrendBundleData {
 export async function generateTrendsForCategory(
   category: string,
 ): Promise<TrendBundleData> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey || groqDisabled) {
-    if (!apiKey) {
-      logger.warn("GROQ_API_KEY not set, returning curated fallback trends");
-    }
+  if (!llmAvailable()) {
+    logger.warn("No LLM provider configured, returning curated fallback trends");
     return STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!;
   }
 
@@ -102,43 +86,15 @@ Return ONLY valid JSON, no prose, no markdown fences. Schema:
 { "keywords": [...], "suffixes": [...], "prefixes": [...] }`;
 
   try {
-    const response = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        temperature: 0.8,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "You output strictly valid JSON." },
-          { role: "user", content: prompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+    const parsed = await chatJSON<TrendBundleData>(
+      [
+        { role: "system", content: "You output strictly valid JSON." },
+        { role: "user", content: prompt },
+      ],
+      { temperature: 0.8, timeoutMs: 15000 },
+    );
 
-    if (!response.ok) {
-      const txt = await response.text();
-      logger.warn(
-        { status: response.status, body: txt.slice(0, 200) },
-        "Groq error",
-      );
-      if (response.status === 401 || response.status === 403 || response.status === 429) {
-        disableGroq(`HTTP ${response.status}`);
-      }
-      return STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!;
-    }
-
-    const json = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const content = json.choices?.[0]?.message?.content;
-    if (!content) return STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!;
-
-    const parsed = JSON.parse(content) as TrendBundleData;
+    if (!parsed) return STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!;
 
     const keywords = (parsed.keywords ?? [])
       .filter(
@@ -178,7 +134,7 @@ Return ONLY valid JSON, no prose, no markdown fences. Schema:
           : (STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!).prefixes,
     };
   } catch (err) {
-    logger.warn({ err }, "Groq trend generation failed, using fallback");
+    logger.warn({ err }, "LLM trend generation failed, using fallback");
     return STATIC_FALLBACK[category] ?? STATIC_FALLBACK.ai!;
   }
 }

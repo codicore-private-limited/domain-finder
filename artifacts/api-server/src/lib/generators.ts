@@ -2,8 +2,11 @@ import { isVowel, hasAwkwardCluster, patternOf } from "./scoring";
 import {
   ADJ_SHORT, VERB_SHORT, NATURE_W1,
   NOUN_BIZ, NOUN_TECH, NOUN_FIN, NOUN_HEALTH,
-  detectRealWords, isPerfectTwoWord,
+  ONE_WORD_POOL, FOUR_LETTER_WORDS,
+  REAL_PHRASES,
+  isSellableDomain,
 } from "./wordlists";
+import { checkTrademarkRisk } from "./trademark";
 
 const BLOCKED_FRAGMENTS = [
   "fuck", "fuk", "fuq", "shit", "cunt", "dick", "cock", "pussy", "bitch",
@@ -639,11 +642,66 @@ const REAL_W1_POOLS = [ADJ_SHORT, VERB_SHORT, NATURE_W1];
 // All W2 pools (business, tech, finance, health nouns)
 const REAL_W2_POOLS = [NOUN_BIZ, NOUN_TECH, NOUN_FIN, NOUN_HEALTH];
 
+// ─────────────────────────────────────────────
+// Deterministic brandable two-word pool. Every W1×W2 pairing is swept in
+// order (rotated by seed), so the hunter marches systematically through the
+// ENTIRE space of meaningful two-word .com concepts — fastpay, cloudvault,
+// smartcare, datahub, codebase, payflow, setuser … — never repeating a name
+// it has already searched. This is the big, fresh, all-.com pool.
+const _TW_JUNK = new Set([
+  "api", "cli", "cpu", "dns", "gpu", "lib", "orm", "sql", "ssl", "sdk",
+  "url", "saas", "css", "php", "xml", "ftp", "ssh", "vpn", "ram", "rom",
+  "usb", "seo", "ceo", "cto", "cfo", "kpi", "roi", "crm", "erp", "ide",
+]);
+const TWO_WORD_W1: string[] = Array.from(
+  new Set(
+    [...ADJ_SHORT, ...VERB_SHORT, ...NATURE_W1].filter(
+      (w) => w.length >= 3 && !_TW_JUNK.has(w),
+    ),
+  ),
+);
+const TWO_WORD_W2: string[] = Array.from(
+  new Set(
+    [...NOUN_BIZ, ...NOUN_TECH, ...NOUN_FIN, ...NOUN_HEALTH].filter(
+      (w) => w.length >= 3 && !_TW_JUNK.has(w),
+    ),
+  ),
+);
+
 export function generateTwoWordReal(
+  count: number,
+  seed = 0,
+  excludeNames?: Set<string>,
+): string[] {
+  const out: string[] = [];
+  const w1n = TWO_WORD_W1.length;
+  const w2n = TWO_WORD_W2.length;
+  const total = w1n * w2n;
+  if (total === 0) return out;
+  // Seed only rotates the starting offset so different cycles begin at
+  // different points; the sweep itself is exhaustive and deterministic.
+  const start = (seed >>> 0) % total;
+  for (let k = 0; k < total && out.length < count; k++) {
+    const idx = (start + k) % total;
+    const w1 = TWO_WORD_W1[Math.floor(idx / w2n)]!;
+    const w2 = TWO_WORD_W2[idx % w2n]!;
+    if (w1 === w2) continue;
+    const fused = w1 + w2;
+    if (fused.length < 5 || fused.length > 12) continue;
+    if (excludeNames && excludeNames.has(fused)) continue;
+    if (hasAwkwardCluster(fused) || !isClean(fused)) continue;
+    out.push(fused);
+  }
+  return out;
+}
+
+// Legacy random two-word generator (kept for any direct callers; the hunter
+// now uses the deterministic sweep above).
+export function generateTwoWordRandom(
   count: number,
   seed = Date.now(),
   maxLen = 12,
-  minLen = 6,
+  minLen = 5,
 ): string[] {
   const rng = makeRng(seed);
   const out = new Set<string>();
@@ -659,6 +717,102 @@ export function generateTwoWordReal(
     if (
       fused.length >= minLen &&
       fused.length <= maxLen &&
+      /^[a-z]+$/.test(fused) &&
+      !hasAwkwardCluster(fused) &&
+      isClean(fused)
+    ) {
+      out.add(fused);
+    }
+  }
+  return Array.from(out);
+}
+
+// ─────────────────────────────────────────────
+// REAL PHRASE — genuine two-word concepts people actually write & search
+// (realestate, creditcard, healthcare, weightloss, sourcecode …). Mined from
+// the Google web corpus and swept MOST-DEMAND-FIRST, skipping searched names.
+// These are the brandable, sellable domains — the kind worth real money.
+// ─────────────────────────────────────────────
+export function generateRealPhrase(
+  count: number,
+  _seed = Date.now(),
+  excludeNames?: Set<string>,
+): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < REAL_PHRASES.length && out.length < count; i++) {
+    const w = REAL_PHRASES[i]!.phrase;
+    if (excludeNames && excludeNames.has(w)) continue;
+    if (hasAwkwardCluster(w) || !isClean(w)) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────
+// ONE-WORD REAL — a single genuine dictionary word (the holy grail)
+// Sweeps the FULL English dictionary SHORTEST-FIRST (3-letter words, then 4,
+// then 5 …) skipping anything already searched, so the hunter marches through
+// “all the world's words” from the smallest length up looking for a free .com.
+// e.g. vault, signal, pixel, harbor, cipher, beacon
+// ─────────────────────────────────────────────
+export function generateOneWordReal(
+  count: number,
+  _seed = Date.now(),
+  excludeNames?: Set<string>,
+): string[] {
+  // ONE_WORD_POOL is already ordered shortest-first; walk it deterministically.
+  const out: string[] = [];
+  for (let i = 0; i < ONE_WORD_POOL.length && out.length < count; i++) {
+    const w = ONE_WORD_POOL[i]!;
+    if (excludeNames && excludeNames.has(w)) continue;
+    if (hasAwkwardCluster(w) || !isClean(w)) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────
+// FOUR-LETTER REAL — real 4-letter dictionary words (vanishingly rare on .com)
+// Deterministic sweep through every real 4-letter word, skipping searched ones.
+// e.g. peak, glow, mint, sage, kite, beam
+// ─────────────────────────────────────────────
+export function generateFourLetterReal(
+  count: number,
+  _seed = Date.now(),
+  excludeNames?: Set<string>,
+): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < FOUR_LETTER_WORDS.length && out.length < count; i++) {
+    const w = FOUR_LETTER_WORDS[i]!;
+    if (excludeNames && excludeNames.has(w)) continue;
+    if (hasAwkwardCluster(w) || !isClean(w)) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────
+// THREE-WORD REAL — three short real words, still compact (≤ 13 chars)
+// e.g. getmybook, onebigidea, topdatahub, mydreamjob
+// ─────────────────────────────────────────────
+const THREE_WORD_CONNECTORS = [
+  "get", "my", "go", "the", "one", "all", "top", "big", "new", "use", "try",
+  "run", "now", "up", "on", "we", "best", "real",
+];
+export function generateThreeWordReal(count: number, seed = Date.now()): string[] {
+  const rng = makeRng(seed);
+  const out = new Set<string>();
+  let attempts = 0;
+  while (out.size < count && attempts < count * 80) {
+    attempts++;
+    const a = pick(THREE_WORD_CONNECTORS, rng);
+    const b = pick(pick(REAL_W1_POOLS, rng), rng);
+    const c = pick(pick(REAL_W2_POOLS, rng), rng);
+    if (a === b || b === c || a === c) continue;
+    const fused = (a + b + c).toLowerCase();
+    if (
+      fused.length >= 7 &&
+      fused.length <= 13 &&
       /^[a-z]+$/.test(fused) &&
       !hasAwkwardCluster(fused) &&
       isClean(fused)
@@ -735,35 +889,48 @@ export function generateNewsDriven(
   return Array.from(out);
 }
 
+// The hunter runs ONE strategy only: real, meaningful phrases (curated modern
+// high-value concepts + demand-ranked corpus phrases). No random combos, no
+// junk dictionary sweeps — only genuine, sellable "hira" candidates.
 export const ALL_STRATEGIES = [
-  "two_word_real",
-  "news_driven",
-  "brandable_cvcv",
-  "future_suffix",
-  "dictionary_hack",
-  "two_word_brandable",
-  "pronounceable_word",
-  "transliteration",
-  "prefix_root",
-  "color_tech",
-  "vowel_start",
-  "portmanteau",
-  "short_suffix",
+  "real_phrase",
 ] as const;
 
-// Length gate varies by strategy type.
-// - Legacy brandable strategies: 5-7 letters
-// - Two-word real / news-driven: 6-12 letters (real 2-word domains are longer)
-const TWO_WORD_STRATEGIES = new Set(["two_word_real", "news_driven"]);
+// Per-strategy length envelope. Exported so the hunter applies the SAME bounds
+// when it filters scored candidates before spending DNS lookups.
+export function lengthBoundsForStrategy(strategy?: string): [number, number] {
+  switch (strategy) {
+    case "one_word_real":
+      return [3, 9];
+    case "four_letter_real":
+    case "four_letter":
+      return [4, 4];
+    case "real_phrase":
+      return [6, 12];
+    case "three_word_real":
+      return [7, 13];
+    case "two_word_real":
+      return [5, 12];
+    case "news_driven":
+      return [5, 13];
+    default:
+      return [5, 12];
+  }
+}
 
 function passesGate(name: string, exclude?: Set<string>, strategy?: string): boolean {
   if (!name) return false;
-  const isTwoWord = strategy ? TWO_WORD_STRATEGIES.has(strategy) : false;
-  const minLen = isTwoWord ? 6 : 5;
-  const maxLen = isTwoWord ? 12 : 7;
+  const [minLen, maxLen] = lengthBoundsForStrategy(strategy);
   if (name.length < minLen || name.length > maxLen) return false;
   if (!/^[a-z]+$/.test(name)) return false;
   if (!isClean(name)) return false;
+  // The hard quality gate: only a genuine single dictionary word or a real
+  // demand-corpus phrase qualifies. Arbitrary fused combos (foggem, duejam)
+  // are rejected outright — no random "altu-faltu" names.
+  if (!isSellableDomain(name)) return false;
+  // Company / trademark protection — drop exact brand collisions so we never
+  // surface another company's name.
+  if (checkTrademarkRisk(name).risk === "high") return false;
   if (exclude && exclude.has(name)) return false;
   return true;
 }
@@ -779,47 +946,26 @@ export function generate(
   const oversample = Math.max(count * 12, 1500);
   let raw: string[];
   switch (strategy) {
-    case "two_word_real":
-      raw = generateTwoWordReal(oversample, seed);
-      break;
+    // Real-phrase: the brandable, sellable two-word concepts (demand-ranked).
+    case "real_phrase":
     case "news_driven":
-      raw = generateNewsDriven(trendKeywords, oversample, seed);
+    case "three_word_real":
+      raw = generateRealPhrase(oversample, seed, excludeNames);
       break;
-    case "brandable_cvcv":
-      raw = generateBrandableCVCV(oversample, seed);
+    // Two-word brandable combos — the large, fresh, all-.com pool.
+    case "two_word_real":
+      raw = generateTwoWordReal(oversample, seed, excludeNames);
       break;
-    case "future_suffix":
-      raw = generateFutureSuffix(category, trendKeywords, oversample, seed);
+    // One-word: the full dictionary swept shortest-first.
+    case "one_word_real":
+      raw = generateOneWordReal(oversample, seed, excludeNames);
       break;
-    case "dictionary_hack":
-      raw = generateDictionaryHack(trendKeywords, oversample, seed);
-      break;
-    case "transliteration":
-      raw = generateTransliteration(oversample, seed);
-      break;
-    case "prefix_root":
-      raw = generatePrefixRoot(oversample, seed);
-      break;
-    case "color_tech":
-      raw = generateColorTech(oversample, seed);
-      break;
-    case "vowel_start":
-      raw = generateVowelStart(oversample, seed);
-      break;
-    case "portmanteau":
-      raw = generatePortmanteau(trendKeywords, oversample, seed);
-      break;
-    case "short_suffix":
-      raw = generateShortSuffix(oversample, seed);
-      break;
-    case "two_word_brandable":
-      raw = generateTwoWordBrandable(oversample, seed);
-      break;
-    case "pronounceable_word":
-      raw = generatePronounceableWord(oversample, seed);
+    case "four_letter_real":
+    case "four_letter":
+      raw = generateFourLetterReal(oversample, seed, excludeNames);
       break;
     default:
-      raw = generateBrandableCVCV(oversample, seed);
+      raw = generateRealPhrase(oversample, seed, excludeNames);
   }
   const fresh: string[] = [];
   const seenLocal = new Set<string>();

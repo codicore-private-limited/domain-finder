@@ -31,7 +31,6 @@ import {
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
@@ -77,6 +76,12 @@ const CATEGORY_COLOR: Record<string, string> = {
 };
 
 const STRATEGY_LABEL: Record<string, string> = {
+  real_phrase: "Meaningful Phrase",
+  one_word_real: "Real Word",
+  two_word_real: "Meaningful Phrase",
+  three_word_real: "Meaningful Phrase",
+  four_letter_real: "Real Word",
+  news_driven: "Trending Phrase",
   brandable_cvcv: "Brandable CVCV",
   future_suffix: "Future Suffix",
   dictionary_hack: "Dictionary Hack",
@@ -91,7 +96,13 @@ const STRATEGY_LABEL: Record<string, string> = {
 };
 
 const PAGE_SIZE = 200;
-const CSV_EXPORT_LIMIT = 2000;
+// Export size choices (Infinity = every match). User-selectable.
+const EXPORT_OPTIONS: { label: string; value: number }[] = [
+  { label: "Top 2,000", value: 2000 },
+  { label: "Top 10,000", value: 10000 },
+  { label: "Top 50,000", value: 50000 },
+  { label: "All matches", value: Number.MAX_SAFE_INTEGER },
+];
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
@@ -108,13 +119,6 @@ function timeAgo(iso: string): string {
   return `${Math.floor(ms / 86_400_000)}d ago`;
 }
 
-function scoreColor(score: number): string {
-  if (score >= 90) return "text-emerald-300";
-  if (score >= 80) return "text-cyan-300";
-  if (score >= 70) return "text-amber-300";
-  return "text-foreground/80";
-}
-
 function scoreBg(score: number): string {
   if (score >= 90) return "from-emerald-500/20 to-emerald-500/5 border-emerald-400/40";
   if (score >= 80) return "from-cyan-500/15 to-cyan-500/5 border-cyan-400/40";
@@ -122,20 +126,20 @@ function scoreBg(score: number): string {
   return "from-card/40 to-card/10 border-border";
 }
 
-function tierLabel(score: number): string {
-  if (score >= 90) return "S-tier diamond";
-  if (score >= 80) return "A-tier brand";
-  if (score >= 70) return "B-tier candidate";
-  return "Watch";
+function demandWord(score: number): string {
+  if (score >= 85) return "Very high real-world usage";
+  if (score >= 65) return "High real-world usage";
+  if (score >= 45) return "Solid real-world usage";
+  return "Niche real-world usage";
 }
 
 function whyBest(d: Discovery): string[] {
   return [
-    `Only ${d.length} letters — short names trade for ${d.length === 5 ? "₹50L–5Cr" : d.length === 6 ? "₹10L–1Cr" : "₹3L–30L"} on Sedo / Afternic.`,
-    `Pattern ${d.pattern} → easy to pronounce, type, and remember (radio-test ${d.radioTest ? "passed" : "borderline"}).`,
-    `Memorability ${d.memorability}/100 — built from vowel rhythm, syllable count, no awkward clusters.`,
-    `${CATEGORY_LABEL[d.category] ?? d.category} sector: founders pay premium .com prices here.`,
-    `Strategy "${STRATEGY_LABEL[d.strategy] ?? d.strategy}" — historically clean brandables only.`,
+    `"${d.name}" is a genuinely meaningful phrase people actually use — a clean, brandable .com (no random letters, no junk words).`,
+    `${demandWord(d.valueScore)} — this concept is searched/written in the real world, so a real buyer would want it.`,
+    `Only ${d.length} letters — short, meaningful .coms are the ones that actually resell for lakhs/crores.`,
+    `Easy to say, type and remember (radio-test ${d.radioTest ? "passed" : "borderline"}).`,
+    `Verified genuinely available right now via Verisign RDAP — always do a final USPTO/WIPO trademark check before buying.`,
   ];
 }
 
@@ -169,8 +173,8 @@ function CompactRow({ d, onExpand }: { d: Discovery; onExpand: () => void }) {
         scoreBg(d.valueScore),
       )}
     >
-      <div className={cn("shrink-0 w-10 text-right font-mono font-bold tabular-nums text-base", scoreColor(d.valueScore))}>
-        {d.valueScore.toFixed(0)}
+      <div className="shrink-0 w-10 text-right" title="Verified available .com">
+        <CheckCircle2 className="ml-auto h-4 w-4 text-emerald-400" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-1.5">
@@ -249,19 +253,20 @@ function DiamondCard({ d }: { d: Discovery }) {
             </Badge>
           </div>
         </div>
-        <div className={cn("shrink-0 rounded-lg border bg-background/40 px-3 py-2 text-right", scoreBg(d.valueScore))}>
-          <div className={cn("text-3xl font-bold leading-none tabular-nums", scoreColor(d.valueScore))}>
-            {d.valueScore.toFixed(0)}
+        <div className="shrink-0 rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-3 py-2 text-right">
+          <div className="flex items-center gap-1.5 text-emerald-300">
+            <CheckCircle2 className="h-5 w-5" />
+            <span className="text-sm font-semibold">Available</span>
           </div>
           <div className="mt-1 text-[9px] uppercase tracking-wider text-muted-foreground">
-            {tierLabel(d.valueScore)}
+            {demandWord(d.valueScore)}
           </div>
         </div>
       </header>
 
       <section className="mt-4 rounded-md border border-border/40 bg-background/30 p-3">
         <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5 flex items-center gap-1">
-          <Sparkles className="h-3 w-3 text-amber-300" /> Why this is a diamond
+          <Sparkles className="h-3 w-3 text-amber-300" /> Why this is a gem
         </div>
         <ul className="space-y-1.5 text-[12px] leading-relaxed text-foreground/85">
           {points.map((p, i) => (
@@ -482,12 +487,11 @@ function csvSafe(s: string): string {
 }
 
 function exportCsv(items: Discovery[]) {
-  const header = "name,fqdn,score,length,pattern,category,strategy,memorability,radio_test,discovered_at,rationale,rdap_status,register_url";
+  const header = "name,fqdn,length,pattern,category,strategy,memorability,radio_test,discovered_at,rationale,rdap_status,register_url";
   const rows = items.map((d) =>
     [
       csvSafe(d.name),
       csvSafe(d.fqdn),
-      d.valueScore.toFixed(1),
       d.length,
       csvSafe(d.pattern),
       csvSafe(d.category),
@@ -505,14 +509,14 @@ function exportCsv(items: Discovery[]) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `diamonds-${new Date().toISOString().slice(0, 10)}-${items.length}.csv`;
+  a.download = `domains-${new Date().toISOString().slice(0, 10)}-${items.length}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
 export function Live() {
   const { events, state, connected } = useHunterStream();
-  const [minScore, setMinScore] = useState(70);
+  const [minScore] = useState(0);
   const [category, setCategory] = useState("all");
   const [strategyFilter, setStrategyFilter] = useState<string | null>(null);
   const [lengthFilter, setLengthFilter] = useState<number | null>(null);
@@ -521,6 +525,7 @@ export function Live() {
   const [viewMode, setViewMode] = useState<"compact" | "detailed">("compact");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [exportLimit, setExportLimit] = useState(2000);
   const [telegramStatus, setTelegramStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
   const queryClient = useQueryClient();
   const filtersKey = `${minScore}-${category}-${strategyFilter ?? ""}-${String(lengthFilter)}`;
@@ -618,7 +623,7 @@ export function Live() {
     setExporting(true);
     try {
       const resp = await fetchDiscoveries({
-        limit: CSV_EXPORT_LIMIT,
+        limit: exportLimit,
         offset: 0,
         minScore,
         category,
@@ -631,7 +636,7 @@ export function Live() {
     } finally {
       setExporting(false);
     }
-  }, [allItems, minScore, category, strategyFilter, lengthFilter]);
+  }, [allItems, exportLimit, minScore, category, strategyFilter, lengthFilter]);
 
   const handleTelegramTest = useCallback(async () => {
     setTelegramStatus("testing");
@@ -811,27 +816,26 @@ export function Live() {
                 </button>
               ))}
             </div>
-            {/* Score slider */}
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground">Score ≥</span>
-              <Slider
-                value={[minScore]}
-                min={50}
-                max={95}
-                step={5}
-                onValueChange={(v) => { setMinScore(v[0] ?? 70); setOffset(0); setAllItems([]); }}
-                className="w-32"
-              />
-              <span className="font-mono text-sm w-8 text-right tabular-nums">{minScore}</span>
-            </div>
-            {/* Export */}
+            {/* Export — customizable size */}
             {allItems.length > 0 && (
-              <Button size="sm" variant="outline" onClick={() => void handleExport()}
-                disabled={exporting}
-                className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/10 text-[11px] h-7 px-2">
-                <Download className="h-3 w-3 mr-1" />
-                {exporting ? "Exporting…" : `Export CSV · top ${Math.min(CSV_EXPORT_LIMIT, totalInDb).toLocaleString()}`}
-              </Button>
+              <div className="flex items-center gap-1.5">
+                <select
+                  value={exportLimit}
+                  onChange={(e) => setExportLimit(Number(e.target.value))}
+                  title="How many to export"
+                  className="rounded border border-border/50 bg-background/60 px-1.5 py-1 text-[11px] text-foreground"
+                >
+                  {EXPORT_OPTIONS.map((o) => (
+                    <option key={o.label} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <Button size="sm" variant="outline" onClick={() => void handleExport()}
+                  disabled={exporting}
+                  className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/10 text-[11px] h-7 px-2">
+                  <Download className="h-3 w-3 mr-1" />
+                  {exporting ? "Exporting…" : `Export CSV (${Math.min(exportLimit, totalInDb).toLocaleString()})`}
+                </Button>
+              </div>
             )}
             {/* View toggle */}
             <div className="flex items-center gap-1">
@@ -1023,6 +1027,42 @@ export function Live() {
                       </button>
                     );
                   })}
+              </div>
+            </div>
+          )}
+
+          {/* Category breakdown */}
+          {state?.perCategory && Object.values(state.perCategory).some((v) => v.checked > 0) && (
+            <div className="mt-3 rounded-lg border border-border bg-card/30 overflow-hidden">
+              <div className="border-b border-border/60 px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                Category breakdown
+              </div>
+              <div className="divide-y divide-border/40">
+                {Object.entries(state.perCategory)
+                  .filter(([, v]) => v.checked > 0)
+                  .sort(([, a], [, b]) => b.diamonds - a.diamonds)
+                  .map(([key, v]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => { setCategory(key); setOffset(0); setAllItems([]); }}
+                      className={cn(
+                        "w-full px-4 py-2 text-[11px] flex items-center justify-between gap-2 text-left transition-colors hover:bg-card/60",
+                        category === key ? "bg-primary/15" : "",
+                      )}
+                    >
+                      <span className={cn(
+                        "inline-flex items-center rounded px-1.5 py-px text-[9px] uppercase tracking-wider border truncate",
+                        CATEGORY_COLOR[key] ?? "border-border text-muted-foreground",
+                      )}>
+                        {CATEGORY_LABEL[key] ?? key}
+                      </span>
+                      <div className="flex items-center gap-2 shrink-0 text-[10px] text-muted-foreground">
+                        <span>{v.checked.toLocaleString()} checked</span>
+                        <span className="font-mono text-emerald-300">{v.diamonds.toLocaleString()} 💎</span>
+                      </div>
+                    </button>
+                  ))}
               </div>
             </div>
           )}

@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Layout } from "@/components/layout";
 import { Live } from "@/pages/live";
 import { Workers } from "@/pages/workers";
+import { FoundDomains } from "@/pages/found";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient({
@@ -21,6 +22,7 @@ function Router() {
     <Layout>
       <Switch>
         <Route path="/live" component={Live} />
+        <Route path="/found" component={FoundDomains} />
         <Route path="/workers" component={Workers} />
         <Route path="/">
           <Redirect to="/live" />

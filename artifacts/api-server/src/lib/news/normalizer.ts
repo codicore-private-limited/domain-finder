@@ -38,6 +38,10 @@ const STOPWORDS = new Set([
   "some", "any", "every", "each", "other", "another", "about", "above",
   "below", "down", "off", "on", "in", "at", "to", "of", "by",
   "as", "is", "it", "its", "be", "or", "if", "an", "a",
+  // Feed / HTML / boilerplate noise that leaks from RSS descriptions.
+  "nbsp", "amp", "quot", "apos", "href", "https", "http", "www", "com",
+  "active", "generic", "ingredient", "ingredients", "exclusive", "reuters",
+  "read", "more", "full", "story", "click", "via", "ago", "report",
 ]);
 
 function classifyCategories(title: string, summary: string | null): string[] {
@@ -74,6 +78,11 @@ const SOURCE_TRUST: Record<string, number> = {
   "reddit:startups": 0.7,
   "reddit:biotech": 0.7,
   "reddit:space": 0.65,
+  // Authoritative primary sources: research, regulatory and funding journalism.
+  arxiv: 0.9,
+  fda: 0.92,
+  techcrunch: 0.8,
+  googlenews: 0.7,
 };
 
 function trustOf(source: string): number {
@@ -92,6 +101,11 @@ function engagementBoost(source: string, metadata: Record<string, unknown>): num
     const comments = Number(metadata.comments ?? 0);
     return Math.min(1, (score / 1000) * 0.6 + (comments / 300) * 0.4);
   }
+  // Primary sources carry no engagement metrics; give them a solid baseline so
+  // their high trust weight isn't washed out.
+  if (source === "fda") return 0.8;
+  if (source === "arxiv") return 0.6;
+  if (source === "techcrunch" || source === "googlenews") return 0.5;
   return 0.3;
 }
 

@@ -156,6 +156,52 @@ export function queueTelegramAlert(payload: TelegramAlertPayload): void {
   if (alertQueue.length > 50) alertQueue = alertQueue.slice(-50);
 }
 
+export interface ExpiringAlertPayload {
+  fqdn: string;
+  phase: string; // "expiring" | "redemption" | "pendingDelete"
+  expirationDate?: string | null;
+  valueReason?: string | null;
+  valueBand?: string | null;
+  realisticUsd?: string | null;
+}
+
+/**
+ * Alert for a HIGH-VALUE domain heading toward release. This is the realistic
+ * crore-grade source: catch a good name the moment it drops. Sent immediately
+ * (not queued) because drop timing is sensitive.
+ */
+export async function sendExpiringAlert(payload: ExpiringAlertPayload): Promise<void> {
+  if (!BOT_TOKEN || !CHAT_ID) return;
+  const phaseLabel: Record<string, string> = {
+    expiring: "⏳ EXPIRING SOON",
+    redemption: "♻️ REDEMPTION PERIOD",
+    pendingDelete: "🗑️ PENDING DELETE (drops soon)",
+    dropping: "🚨 DROPPING",
+  };
+  const head = phaseLabel[payload.phase] ?? "⏳ EXPIRING";
+  const exp = payload.expirationDate
+    ? new Date(payload.expirationDate).toISOString().slice(0, 10)
+    : "unknown";
+  const lines = [
+    `${head} — <b>${payload.fqdn.toUpperCase()}</b>`,
+    ``,
+    `📅 <b>Expiry:</b> ${exp}`,
+    payload.valueReason ? `💡 <b>Why valuable:</b> ${payload.valueReason}` : "",
+    payload.valueBand
+      ? `💰 <b>Realistic value:</b> ${payload.valueBand}${payload.realisticUsd ? ` (${payload.realisticUsd})` : ""}`
+      : "",
+    ``,
+    `<b>🎯 Action:</b> This name is TAKEN now but heading toward release.`,
+    `To actually win it on drop, set a backorder:`,
+    `• <a href="https://www.dropcatch.com/domain/${payload.fqdn}">DropCatch</a>`,
+    `• <a href="https://www.snapnames.com/searchresult.action?searchTerm=${payload.fqdn}">SnapNames</a>`,
+    `• <a href="https://www.godaddy.com/domain-value-appraisal/${payload.fqdn}">GoDaddy Backorder</a>`,
+    ``,
+    `⚠️ <i>Honest note: drops are competitive — a backorder service is usually required to win a good name. No guarantee.</i>`,
+  ].filter(Boolean);
+  await sendTelegramMessage(lines.join("\n"));
+}
+
 export async function sendStartupAlert(diamondCount: number): Promise<void> {
   if (!BOT_TOKEN || !CHAT_ID) return;
   const text = [

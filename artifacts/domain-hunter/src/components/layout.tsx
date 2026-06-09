@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { href: "/live", label: "Live Hunter" },
+  { href: "/found", label: "Found Domains" },
   { href: "/workers", label: "Workers" },
 ];
 

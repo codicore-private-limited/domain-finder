@@ -1,4 +1,15 @@
-import { detectRealWords } from "./wordlists";
+import {
+  detectRealWords, meaningfulSegments, COMMON_WORDS,
+  phraseDemand, isRealPhrase, isRecognizableWord, isSellableDomain,
+} from "./wordlists";
+import { checkTrademarkRisk } from "./trademark";
+
+/** High-frequency common words (for the "every segment is recognizable" bonus). */
+let _commonSet: Set<string> | null = null;
+function commonSet(): Set<string> {
+  if (!_commonSet) _commonSet = new Set(COMMON_WORDS);
+  return _commonSet;
+}
 
 const VOWELS = new Set(["a", "e", "i", "o", "u"]);
 
@@ -164,19 +175,22 @@ export function phoneticScore(name: string): number {
 }
 
 /**
- * Real-word detection score.
- * Perfect 2-word split (both real words) = 100
- * One real word found = 40-70 based on coverage
- * No real words = 10
+ * Real-word detection score — now driven by exact word-break segmentation.
+ * Perfect 2-word domain = 100, single real word = 92, three words = 80.
+ * A name that is NOT fully made of real words can never score above ~38.
  */
 export function realWordScore(name: string): number {
-  const { words, coverage } = detectRealWords(name);
-  if (words.length === 2 && coverage >= 0.95) return 100;
-  if (words.length === 2 && coverage >= 0.7) return 85;
-  if (words.length >= 1 && coverage >= 0.6) return 65;
-  if (words.length >= 1 && coverage >= 0.4) return 45;
-  if (words.length >= 1) return 30;
-  return 10;
+  const seg = meaningfulSegments(name);
+  if (seg) {
+    if (seg.length === 2) return 100;
+    if (seg.length === 1) return 92;
+    return 80; // 3 real words
+  }
+  // Not meaningful — only a partial embedded word at best.
+  const { coverage } = detectRealWords(name);
+  if (coverage >= 0.7) return 38;
+  if (coverage >= 0.5) return 25;
+  return 8;
 }
 
 /**
@@ -247,6 +261,54 @@ export interface ScoreOutput {
   pattern: string;
 }
 
+/**
+ * Real-world DESIRABILITY of a genuinely meaningful name. The number is honest:
+ *  - a known real phrase is scored from its actual web-usage demand, plus a
+ *    shortness bonus (short, in-demand phrases are the sellable gems);
+ *  - a single real dictionary word .com is inherently premium;
+ *  - a clean fused 2-3 word combo gets a solid baseline.
+ * There is no fabricated "crore" rating any more — demand drives the score.
+ */
+function meaningfulValue(seg: string[], name: string): number {
+  const len = name.length;
+  let score: number;
+
+  if (isRecognizableWord(name)) {
+    // Single genuine, recognizable dictionary word — the rarest, most valuable.
+    score = 72;
+    if (len <= 4) score += 25;
+    else if (len === 5) score += 20;
+    else if (len === 6) score += 14;
+    else if (len === 7) score += 8;
+    else if (len === 8) score += 3;
+    else score += 0;
+  } else if (isRealPhrase(name)) {
+    // Known real two-word concept — score from ACTUAL demand (web usage).
+    const d = phraseDemand(name); // 0-100 real signal
+    score = 50 + d * 0.4; // demand 100 → +40, demand 30 → +12
+    if (len <= 6) score += 10;
+    else if (len === 7) score += 7;
+    else if (len === 8) score += 4;
+    else if (len === 9) score += 2;
+    else if (len === 10) score += 0;
+    else if (len === 11) score -= 3;
+    else score -= 6;
+  } else {
+    // Clean fused combo of real words (not a corpus phrase) — solid but lower.
+    score = seg.length === 2 ? 70 : 60;
+    if (len <= 6) score += 8;
+    else if (len === 7) score += 5;
+    else if (len === 8) score += 2;
+    else if (len >= 11) score -= 5;
+  }
+
+  // Pronounceability.
+  if (!radioTest(name)) score -= 5;
+  if (hasAwkwardCluster(name)) score -= 12;
+
+  return Math.max(40, Math.min(99, score));
+}
+
 export function scoreCandidate(input: ScoreInput): ScoreOutput {
   const { name, tld, trendKeywords } = input;
   const len = lengthScore(name);
@@ -259,24 +321,25 @@ export function scoreCandidate(input: ScoreInput): ScoreOutput {
   const realWord = realWordScore(name);
   const crore = crorePotentialScore(name, tld, trendKeywords);
 
-  // New weighted formula:
-  // realWord gets 20% weight — this is the KEY differentiator
-  // length reduced to 10% — 2-word domains are longer but more valuable
-  // tld stays important at 18%
-  // trend gets 15% — news-driven relevance
-  // memorability 15% — now includes real-word bonus internally
-  // phonetic 10%
-  // crore 7% — premium signal
-  // radioTest 5%
-  const value =
-    realWord * 0.20 +
-    len * 0.10 +
-    tldS * 0.18 +
-    trend * 0.15 +
-    memo * 0.15 +
-    phonetic * 0.10 +
-    crore * 0.07 +
-    radioS * 0.05;
+  const seg = meaningfulSegments(name);
+  let value: number;
+  if (!seg || !isSellableDomain(name)) {
+    // Not a recognizable single word and not a real demand-corpus phrase →
+    // gibberish, obscure scientific term, OR an arbitrary fused combo. Hard-cap
+    // so it can NEVER pass the gate or look like a pick.
+    value = Math.min(20, 5 + realWord * 0.3);
+  } else {
+    value = meaningfulValue(seg, name);
+    // .com is the benchmark; alternative TLDs are worth a little less.
+    const t = tld.toLowerCase();
+    if (t !== "com") value -= t === "io" || t === "ai" ? 4 : 8;
+    // Company / trademark protection — never surface a brand-collision name
+    // with a healthy score (protects the operator from legal exposure).
+    const tm = checkTrademarkRisk(name);
+    if (tm.risk === "high") value = Math.min(value, 22);
+    else if (tm.risk === "medium") value = Math.max(40, value - 18);
+    value = Math.max(0, Math.min(99, value));
+  }
 
   return {
     valueScore: Math.round(value * 10) / 10,

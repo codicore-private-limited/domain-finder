@@ -167,6 +167,31 @@ router.get("/discoveries", async (req, res): Promise<void> => {
 
   const cacheKey = `${minScore}|${category ?? ""}|${strategy ?? ""}|${lengthFilter ?? ""}`;
 
+  // Optional: rank by our appraisal estimated value instead of score. We fetch a
+  // wide window, appraise, sort by $ value, then page in JS.
+  const sortByValue = req.query.sortBy === "value";
+  const minValue = Number(req.query.minValue ?? 0);
+
+  if (sortByValue) {
+    const pool = await db
+      .select()
+      .from(discoveriesTable)
+      .where(where)
+      .orderBy(desc(discoveriesTable.valueScore))
+      .limit(4000);
+    const appraised = pool
+      .map(rowToDiscovery)
+      .filter((d) => (d.estimatedValue ?? 0) >= (Number.isFinite(minValue) ? minValue : 0))
+      .sort((a, b) => (b.estimatedValue ?? 0) - (a.estimatedValue ?? 0));
+    res.json({
+      total: appraised.length,
+      offset,
+      limit,
+      items: appraised.slice(offset, offset + limit),
+    });
+    return;
+  }
+
   const [rows, total] = await Promise.all([
     db
       .select()

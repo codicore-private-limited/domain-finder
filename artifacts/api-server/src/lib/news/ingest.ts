@@ -10,6 +10,8 @@ import {
 import { logger } from "../logger";
 import { fetchAllSources } from "./sources";
 import { normalizeBatch, type NormalizedEvent } from "./normalizer";
+import { extractSeedsFromEvents } from "./extractor";
+import { runDomainSuggester } from "./domain-suggester";
 
 export interface NewsIngestEvent {
   ts: string;
@@ -68,6 +70,26 @@ class NewsIngest extends EventEmitter {
     const result = await this.persistEvents(normalized);
     await this.recomputeTrendSignals();
 
+    // Extract high-value generic keyword seeds (funding / FDA / research) via LLM.
+    // Never let this block or crash the ingest cycle.
+    let seedsExtracted = 0;
+    try {
+      seedsExtracted = await extractSeedsFromEvents(normalized);
+    } catch (err) {
+      logger.error({ err }, "Seed extraction failed");
+    }
+
+    // Run the LLM-powered domain suggester: seeds → candidate names → DNS/RDAP
+    // check → save as discoveries. Runs async, never blocks the ingest cycle.
+    // Only run every 2nd ingest cycle to avoid hammering the LLM API.
+    if (this.state.runs % 2 === 0) {
+      runDomainSuggester().then((r) => {
+        if (r.saved > 0) {
+          logger.info(r, "LLM domain suggester: new names found from news seeds");
+        }
+      }).catch((err) => logger.error({ err }, "Domain suggester failed"));
+    }
+
     this.state.lastRunAt = new Date().toISOString();
     this.state.lastIngested = result.inserted;
     this.state.totalIngested += result.inserted;
@@ -88,7 +110,7 @@ class NewsIngest extends EventEmitter {
     };
     this.emit("ingest", ev);
     logger.info(
-      { ingested: result.inserted, duplicates: result.duplicates, ms: Date.now() - started },
+      { ingested: result.inserted, duplicates: result.duplicates, seeds: seedsExtracted, ms: Date.now() - started },
       "News ingest cycle complete",
     );
     return ev;

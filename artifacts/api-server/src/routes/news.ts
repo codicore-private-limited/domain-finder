@@ -4,6 +4,9 @@ import {
   getRecentEvents,
   getTopTrendSignals,
 } from "../lib/news/ingest";
+import { expiringMonitor } from "../lib/news/expiring";
+import { db, expiringWatchTable } from "@workspace/db";
+import { desc } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -54,6 +57,46 @@ router.get("/news/trends", async (req, res): Promise<void> => {
         r.lastSeenAt instanceof Date
           ? r.lastSeenAt.toISOString()
           : new Date(r.lastSeenAt).toISOString(),
+    })),
+  );
+});
+
+router.get("/news/expiring/status", (_req, res): void => {
+  res.json(expiringMonitor.getState());
+});
+
+router.post("/news/expiring/scan", async (_req, res): Promise<void> => {
+  const result = await expiringMonitor.runOnce();
+  res.json(result);
+});
+
+router.get("/news/expiring", async (req, res): Promise<void> => {
+  const limit = Math.min(Number(req.query.limit ?? 50), 200);
+  const rows = await db
+    .select()
+    .from(expiringWatchTable)
+    .orderBy(desc(expiringWatchTable.updatedAt))
+    .limit(limit);
+  res.json(
+    rows.map((r) => ({
+      fqdn: r.fqdn,
+      name: r.name,
+      phase: r.phase,
+      status: r.status,
+      valueReason: r.valueReason,
+      valueBand: r.valueBand,
+      expirationDate:
+        r.expirationDate instanceof Date
+          ? r.expirationDate.toISOString()
+          : r.expirationDate
+            ? new Date(r.expirationDate).toISOString()
+            : null,
+      alertedAt:
+        r.alertedAt instanceof Date
+          ? r.alertedAt.toISOString()
+          : r.alertedAt
+            ? new Date(r.alertedAt).toISOString()
+            : null,
     })),
   );
 });

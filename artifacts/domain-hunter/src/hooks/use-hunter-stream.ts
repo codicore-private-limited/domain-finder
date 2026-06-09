@@ -213,6 +213,8 @@ export async function fetchDiscoveries(params: {
   category?: string;
   strategy?: string | null;
   length?: number | null;
+  sortBy?: "score" | "value";
+  minValue?: number;
 }): Promise<DiscoveriesResponse> {
   const qs = new URLSearchParams();
   if (params.limit != null) qs.set("limit", String(params.limit));
@@ -221,6 +223,8 @@ export async function fetchDiscoveries(params: {
   if (params.category && params.category !== "all") qs.set("category", params.category);
   if (params.strategy && params.strategy !== "all") qs.set("strategy", params.strategy);
   if (params.length != null) qs.set("length", String(params.length));
+  if (params.sortBy === "value") qs.set("sortBy", "value");
+  if (params.minValue != null && params.minValue > 0) qs.set("minValue", String(params.minValue));
   const res = await fetch(`${API_BASE}/discoveries?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return (await res.json()) as DiscoveriesResponse;

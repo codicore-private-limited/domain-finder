@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
-import { sql, inArray } from "drizzle-orm";
+import { sql, inArray, eq } from "drizzle-orm";
 import { db, discoveriesTable, dnsCacheTable } from "@workspace/db";
-import { generateBulk, ALL_STRATEGIES } from "./generators";
+import { ALL_STRATEGIES } from "./generators";
 import { scoreCandidate } from "./scoring";
 import { generateTrendsForCategory, buildRationale } from "./groq";
 import { dnsAvailabilityBatch, type DnsCheckResult } from "./availability";
@@ -9,9 +9,18 @@ import { rdapBatch } from "./rdap";
 import { logger } from "./logger";
 import { queueTelegramAlert, sendStartupAlert } from "./telegram";
 import { getTrendKeywordsForCategory } from "./news/ingest";
+import { getSeedKeywordsForCategory } from "./news/extractor";
 import { filterLegallyAllowed } from "./legal/gate";
+import { isSellableDomain, HUNT_POOL } from "./wordlists";
 
 const TELEGRAM_ALERT_THRESHOLD = 96;
+
+// Re-check every name's .com on this interval so we catch the rare ones that
+// EXPIRE and become available again. Expiry is the only realistic way a good
+// name frees up — so we keep sweeping the whole hunt pool (good one-word
+// dictionary words + meaningful phrases) and re-probe each name once its last
+// check ages past this window.
+const PHRASE_RECHECK_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 const CATEGORIES = [
   "ai",
@@ -82,9 +91,9 @@ export interface HunterState {
 }
 
 const RING_SIZE = 250;
-const DEFAULT_BATCH_SIZE = 400;
-const DEFAULT_CONCURRENCY = 96;
-const DEFAULT_MIN_SCORE = 65;
+const DEFAULT_BATCH_SIZE = 1000;
+const DEFAULT_CONCURRENCY = 200;
+const DEFAULT_MIN_SCORE = 0;
 
 class Hunter extends EventEmitter {
   private state: HunterState = {
@@ -137,6 +146,10 @@ class Hunter extends EventEmitter {
   private everSearchedBare = new Set<string>();
   private historyLoaded = false;
 
+  // Re-check bookkeeping: bare phrase → last DNS-check time (ms). Drives the
+  // periodic re-probe of meaningful phrases so expiring .coms get caught.
+  private phraseLastCheck = new Map<string, number>();
+
   private trackSearched(fqdn: string) {
     if (this.everSearched.has(fqdn)) return;
     this.everSearched.add(fqdn);
@@ -163,17 +176,48 @@ class Hunter extends EventEmitter {
   async loadHistory() {
     if (this.historyLoaded) return;
     try {
-      const rows = await db.select({ fqdn: dnsCacheTable.fqdn }).from(dnsCacheTable);
-      for (const r of rows) this.trackSearched(r.fqdn);
+      const rows = await db
+        .select({ fqdn: dnsCacheTable.fqdn, checkedAt: dnsCacheTable.checkedAt })
+        .from(dnsCacheTable);
+      const phraseSet = new Set(HUNT_POOL);
+      for (const r of rows) {
+        this.trackSearched(r.fqdn);
+        // Record last-check time for hunt-pool names so the recheck sweep
+        // knows when each name is due for another availability probe.
+        const dot = r.fqdn.indexOf(".");
+        const bare = dot > 0 ? r.fqdn.slice(0, dot) : r.fqdn;
+        if (phraseSet.has(bare) && r.checkedAt) {
+          this.phraseLastCheck.set(bare, new Date(r.checkedAt).getTime());
+        }
+      }
       this.state.everSearchedSize = this.everSearched.size;
       this.historyLoaded = true;
       logger.info(
-        { historySize: this.everSearched.size },
+        { historySize: this.everSearched.size, phrasesTracked: this.phraseLastCheck.size },
         "Hunter history loaded into memory",
       );
     } catch (err) {
       logger.error({ err }, "Failed to load DNS history");
     }
+  }
+
+  /**
+   * Build the next batch of names to probe. Walks the full hunt pool (good
+   * one-word dictionary words + meaningful phrases, highest-value first) and
+   * selects every name whose .com has NOT been checked within the recheck
+   * window. This is how the hunter keeps catching the rare name that expires
+   * and frees up — it never gives up on the good names.
+   */
+  private buildPhraseBatch(limit: number): string[] {
+    const now = Date.now();
+    const out: string[] = [];
+    for (let i = 0; i < HUNT_POOL.length && out.length < limit; i++) {
+      const name = HUNT_POOL[i]!;
+      const last = this.phraseLastCheck.get(name) ?? 0;
+      if (now - last < PHRASE_RECHECK_MS) continue;
+      out.push(name);
+    }
+    return out;
   }
 
   private emitEvent(ev: Omit<HunterEvent, "id" | "ts">) {
@@ -290,6 +334,11 @@ class Hunter extends EventEmitter {
     const cached = this.trendCache.get(category);
     if (cached && cached.expiresAt > Date.now()) return cached.keywords;
 
+    // Priority 0: fresh LLM-extracted seeds from funding/FDA/research events.
+    // These are the strongest, most time-sensitive commercial signals.
+    const seedSignals = await getSeedKeywordsForCategory(category, 8).catch(() => []);
+    const seedKeywords = seedSignals.map((s) => s.keyword);
+
     // Priority 1: live news-derived trend signals (event-driven).
     const newsSignals = await getTrendKeywordsForCategory(category, 10).catch(() => []);
     const newsKeywords = newsSignals.map((s) => s.keyword);
@@ -298,14 +347,22 @@ class Hunter extends EventEmitter {
     const bundle = await generateTrendsForCategory(category);
     const baseKeywords = bundle.keywords.map((k) => k.keyword);
 
-    // Merge: news signals first (deduped), then base keywords.
+    // Merge: seeds first, then news signals, then base keywords (deduped).
     const seen = new Set<string>();
     const merged: string[] = [];
-    for (const k of [...newsKeywords, ...baseKeywords]) {
+    for (const k of [...seedKeywords, ...newsKeywords, ...baseKeywords]) {
       if (k && !seen.has(k)) {
         seen.add(k);
         merged.push(k);
       }
+    }
+
+    if (seedKeywords.length > 0) {
+      this.emitEvent({
+        kind: "info",
+        message: `[${category}] funding/research seeds injected: ${seedKeywords.slice(0, 5).join(", ")}`,
+        data: { category, seedKeywords, source: "domain_seeds" },
+      });
     }
 
     if (newsKeywords.length > 0) {
@@ -366,10 +423,17 @@ class Hunter extends EventEmitter {
 
   private async bulkCacheUpsert(results: DnsCheckResult[]) {
     if (results.length === 0) return;
+    // Dedupe by fqdn — Postgres ON CONFLICT DO UPDATE cannot affect the same row
+    // twice in one statement, so a batch with a repeated fqdn would throw and
+    // lose the whole batch (including newly-found available names). Keep the
+    // last occurrence for each fqdn.
+    const byFqdn = new Map<string, DnsCheckResult>();
+    for (const r of results) byFqdn.set(r.fqdn, r);
+    const deduped = Array.from(byFqdn.values());
     // Chunk to keep parameter count safe (1000 params per chunk).
     const CHUNK = 250;
-    for (let i = 0; i < results.length; i += CHUNK) {
-      const slice = results.slice(i, i + CHUNK);
+    for (let i = 0; i < deduped.length; i += CHUNK) {
+      const slice = deduped.slice(i, i + CHUNK);
       await db
         .insert(dnsCacheTable)
         .values(
@@ -412,104 +476,55 @@ class Hunter extends EventEmitter {
       });
     }
 
-    const seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
     const requested = this.state.batchSize;
 
-    // Reuse the pre-built bare-name view of everSearched (maintained in
-    // trackSearched) so we don't rebuild a fresh Set of every historical name
-    // on every single cycle — that was the primary heap pressure on small
-    // Render instances.
-    // Generate ~2K candidates internally (sustained ~hundreds of thousands /sec
-    // when summed across cycles). Bigger numbers blocked the event loop.
-    const overGen = Math.max(requested * 8, 2000);
+    // ── Build the probe batch from the meaningful-phrase list ──
+    // The hunter only ever hunts genuine, sellable phrases (curated modern
+    // high-value concepts + demand-ranked corpus). buildPhraseBatch walks them
+    // highest-value-first and returns those due for a (re)check. There is NO
+    // numeric "rating" gate — every real phrase that is due gets probed; if its
+    // .com is free, it is a diamond. Period.
     const tEvalStart = Date.now();
-    const { names: freshNames, evaluated } = generateBulk(
-      strategy,
-      category,
-      trends,
-      overGen,
-      seed,
-      this.everSearchedBare,
-      3,
-    );
+    const batch = this.buildPhraseBatch(requested);
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
+    const evaluated = HUNT_POOL.length;
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
-    this.state.totalGenerated += freshNames.length;
-    this.bumpStat("perStrategy", strategy, "generated", freshNames.length);
-    this.bumpStat("perCategory", category, "generated", freshNames.length);
+    this.state.totalGenerated += batch.length;
+    this.bumpStat("perStrategy", strategy, "generated", batch.length);
+    this.bumpStat("perCategory", category, "generated", batch.length);
 
-    if (freshNames.length === 0) {
+    if (batch.length === 0) {
+      // Every meaningful phrase was checked within the recheck window — nothing
+      // is due yet. Idle quietly until a name ages out (this is the expected
+      // "1 gem a day/week" cadence the user asked for).
       this.emitEvent({
         kind: "info",
-        message: `[${category}/${strategy}] generator exhausted vs ${this.everSearched.size.toLocaleString()} known names — rotating`,
+        message: `All ${HUNT_POOL.length.toLocaleString()} good names recently checked — waiting for the next one to free up`,
       });
+      await new Promise((r) => setTimeout(r, 15000));
       return;
     }
 
-    // Score every fresh candidate (in-memory, fast).
-    const scored = freshNames.map((name) => {
-      const s = scoreCandidate({ name, tld: "com", trendKeywords: trends });
-      return { name, score: s };
-    });
-    scored.sort((a, b) => b.score.valueScore - a.score.valueScore);
-
-    // Strict diamond gate — only score-passing AND length-clean candidates go to DNS.
-    // Two-word strategies (two_word_real, news_driven) produce 6-12 char domains.
-    const isTwoWordStrategy = strategy === "two_word_real" || strategy === "news_driven";
-    const minLen = isTwoWordStrategy ? 6 : 5;
-    const maxLen = isTwoWordStrategy ? 12 : 7;
-    const candidates = scored.filter(
-      (s) =>
-        s.score.valueScore >= this.state.effectiveMinScore &&
-        s.name.length >= minLen &&
-        s.name.length <= maxLen,
-    );
-    // Cap DNS work to top-K to keep DNS load sane (real net has limits).
-    const passing = candidates.slice(0, Math.min(requested, candidates.length));
-    const filteredCount = scored.length - passing.length;
-    this.state.totalScoreFiltered += filteredCount;
+    // Score purely for storage + ordering (real-world demand), NOT as a rating
+    // gate. Phrases are already demand-ordered, so we keep that order.
+    const scored = batch.map((name) => ({
+      name,
+      score: scoreCandidate({ name, tld: "com", trendKeywords: trends }),
+    }));
+    const passing = scored;
     const evalRate = Math.round((evaluated / evalElapsed) * 1000);
-
-    if (passing.length === 0) {
-      this.state.starvationStreak++;
-      this.emitEvent({
-        kind: "phase",
-        message: `Cycle #${this.state.cycle} [${category}/${strategy}]: ${freshNames.length} fresh of ${evaluated.toLocaleString()} evaluated (~${evalRate.toLocaleString()}/s), 0 above ${this.state.effectiveMinScore}, top=${scored[0]?.score.valueScore ?? 0}`,
-        data: {
-          cycle: this.state.cycle,
-          category,
-          strategy,
-          generated: freshNames.length,
-          evaluated,
-          evalRate,
-          topRejected: scored
-            .slice(0, 3)
-            .map((s) => ({ name: s.name, score: s.score.valueScore })),
-        },
-      });
-      if (this.state.starvationStreak >= 8 && this.state.effectiveMinScore > 30) {
-        const newScore = Math.max(30, this.state.effectiveMinScore - 5);
-        this.state.effectiveMinScore = newScore;
-        this.state.starvationStreak = 0;
-        this.emitEvent({
-          kind: "info",
-          message: `Auto-relaxed score gate to ≥${newScore}`,
-        });
-      }
-      return;
-    }
     this.state.starvationStreak = 0;
 
     this.emitEvent({
       kind: "phase",
-      message: `Cycle #${this.state.cycle} [${category}/${strategy}]: ${evaluated.toLocaleString()} evaluated · ${freshNames.length} fresh · probing top ${passing.length} (#1: ${passing[0]?.name}=${passing[0]?.score.valueScore})`,
+      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful phrases (#1: ${passing[0]?.name})`,
       data: {
         cycle: this.state.cycle,
         category,
         strategy,
         probing: passing.length,
-        generated: freshNames.length,
+        generated: batch.length,
         evaluated,
         evalRate,
         topPassed: passing
@@ -526,8 +541,14 @@ class Hunter extends EventEmitter {
     const ratePerSec = elapsed > 0 ? Math.round(fqdns.length / elapsed) : fqdns.length;
     this.recordThroughput(fqdns.length);
 
-    // Update history immediately for ALL results.
-    for (const r of results) this.trackSearched(r.fqdn);
+    // Update history + recheck timestamps for ALL probed names.
+    const nowMs = Date.now();
+    for (const r of results) {
+      this.trackSearched(r.fqdn);
+      const dot = r.fqdn.indexOf(".");
+      const bare = dot > 0 ? r.fqdn.slice(0, dot) : r.fqdn;
+      this.phraseLastCheck.set(bare, nowMs);
+    }
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
     this.bumpStat("perStrategy", strategy, "checked", results.length);
@@ -798,6 +819,74 @@ class Hunter extends EventEmitter {
       this.emitEvent({ kind: "error", message: `Cleanup error: ${(err as Error).message}` });
     } finally {
       this.state.cleanupRunning = false;
+    }
+  }
+
+  /**
+   * One-shot quality sweep over the persisted discoveries:
+   *  - deletes any name that no longer passes the meaningful-word gate
+   *    (legacy gibberish from before the real-word rewrite), and
+   *  - refreshes valueScore for everything that survives so the live page
+   *    reflects the current rating model.
+   * Runs in the background on boot; never throws to the caller.
+   */
+  async purgeMeaninglessDiscoveries() {
+    try {
+      const rows = await db
+        .select({
+          id: discoveriesTable.id,
+          name: discoveriesTable.name,
+          tld: discoveriesTable.tld,
+        })
+        .from(discoveriesTable);
+      if (rows.length === 0) return;
+
+      const toDelete: number[] = [];
+      const toRescore: { id: number; score: number }[] = [];
+      for (const r of rows) {
+        if (!isSellableDomain(r.name)) {
+          toDelete.push(r.id);
+          continue;
+        }
+        const s = scoreCandidate({ name: r.name, tld: r.tld, trendKeywords: [] });
+        toRescore.push({ id: r.id, score: s.valueScore });
+      }
+
+      const CHUNK = 200;
+      for (let i = 0; i < toDelete.length; i += CHUNK) {
+        const slice = toDelete.slice(i, i + CHUNK);
+        await db.delete(discoveriesTable).where(inArray(discoveriesTable.id, slice));
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      for (let i = 0; i < toRescore.length; i += CHUNK) {
+        const slice = toRescore.slice(i, i + CHUNK);
+        await Promise.all(
+          slice.map((u) =>
+            db
+              .update(discoveriesTable)
+              .set({ valueScore: u.score.toFixed(2) })
+              .where(eq(discoveriesTable.id, u.id)),
+          ),
+        );
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      this.state.totalDiscoveries = Math.max(
+        0,
+        this.state.totalDiscoveries - toDelete.length,
+      );
+      if (toDelete.length > 0 || toRescore.length > 0) {
+        logger.info(
+          { removed: toDelete.length, rescored: toRescore.length },
+          "Discovery quality sweep complete",
+        );
+        this.emitEvent({
+          kind: "info",
+          message: `Quality sweep: removed ${toDelete.length} meaningless names, refreshed ${toRescore.length} scores`,
+        });
+      }
+    } catch (err) {
+      logger.error({ err }, "purgeMeaninglessDiscoveries failed");
     }
   }
 

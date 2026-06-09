@@ -100,3 +100,84 @@ export const legalDecisionsTable = pgTable(
 );
 
 export type LegalDecisionRow = typeof legalDecisionsTable.$inferSelect;
+
+/**
+ * High-value generic keyword "seeds" extracted from funding / research / FDA
+ * events by the LLM. These bias the Hunter toward freshly-emerging commercial
+ * trends BEFORE they hit the mainstream — the core edge of the engine.
+ *
+ * We deliberately store only GENERIC product/tech terms (company/brand names are
+ * rejected upstream) to stay clear of trademark / UDRP risk.
+ */
+export const domainSeedsTable = pgTable(
+  "domain_seeds",
+  {
+    id: serial("id").primaryKey(),
+    // Lowercase generic keyword or short two-word phrase (no brand names).
+    keyword: text("keyword").notNull(),
+    category: text("category").notNull(),
+    // Where it came from (news_event url) for explainability.
+    sourceUrl: text("source_url"),
+    sourceTitle: text("source_title"),
+    // Detected funding amount in USD (0 if unknown / not a funding event).
+    fundingUsd: numeric("funding_usd", { precision: 16, scale: 2 })
+      .notNull()
+      .default("0"),
+    // "funding" | "research" | "pharma" | "trend"
+    origin: text("origin").notNull().default("trend"),
+    // 0..100 priority weight (funding size + source trust).
+    weight: numeric("weight", { precision: 5, scale: 2 }).notNull().default("0"),
+    // Set once the Hunter has consumed this seed into a generation cycle.
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    keywordIdx: uniqueIndex("domain_seeds_keyword_unique").on(t.keyword),
+    categoryIdx: index("domain_seeds_category_idx").on(t.category),
+    weightIdx: index("domain_seeds_weight_idx").on(t.weight),
+  }),
+);
+
+export type DomainSeedRow = typeof domainSeedsTable.$inferSelect;
+
+/**
+ * Watch-list of HIGH-VALUE .com domains that are currently TAKEN but heading
+ * toward release (expiration soon, redemption / pending-delete status). These
+ * are the realistic source of crore-grade names: catching a good domain the
+ * moment it drops. We alert the user BEFORE the drop date so they can backorder.
+ */
+export const expiringWatchTable = pgTable(
+  "expiring_watch",
+  {
+    id: serial("id").primaryKey(),
+    fqdn: text("fqdn").notNull(),
+    // The bare name (no .com) — matches our hunt pool entries.
+    name: text("name").notNull(),
+    // RDAP expiration date, if known.
+    expirationDate: timestamp("expiration_date", { withTimezone: true }),
+    // Latest RDAP status tags (e.g. "redemptionPeriod","pendingDelete").
+    status: jsonb("status").notNull().$type<string[]>(),
+    // "expiring" (date soon) | "redemption" | "pendingDelete" | "dropping"
+    phase: text("phase").notNull(),
+    // Why we think it's valuable (matched curated phrase / short word / seed).
+    valueReason: text("value_reason"),
+    // Realistic resale band label (plain words, not a numeric score).
+    valueBand: text("value_band"),
+    alertedAt: timestamp("alerted_at", { withTimezone: true }),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    fqdnIdx: uniqueIndex("expiring_watch_fqdn_unique").on(t.fqdn),
+    phaseIdx: index("expiring_watch_phase_idx").on(t.phase),
+    expIdx: index("expiring_watch_exp_idx").on(t.expirationDate),
+  }),
+);
+
+export type ExpiringWatchRow = typeof expiringWatchTable.$inferSelect;
