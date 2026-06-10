@@ -110,8 +110,6 @@ jobs:
 
           # Install production dependencies in deploy package
           cd deploy-package
-          corepack enable
-          npm install -g pnpm@10
           pnpm install --frozen-lockfile --prod=false
           cd ..
 
