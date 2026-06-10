@@ -36,7 +36,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: codicore    # <-- Change this to your Azure App Service name
+  AZURE_WEBAPP_NAME: codicore-domainfinder    # <-- Change this to your Azure App Service name
   NODE_VERSION: "24"
 
 jobs:
