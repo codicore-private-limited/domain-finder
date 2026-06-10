@@ -125,7 +125,7 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
 
       // Batch DNS check.
       const fqdns = candidates.map((n) => n + ".com");
-      const dnsResults = await dnsAvailabilityBatch(fqdns, DNS_CONCURRENCY).catch(() => []);
+      const dnsResults = await dnsAvailabilityBatch(fqdns, DNS_CONCURRENCY).catch((): import("../availability").DnsCheckResult[] => []);
 
       const availableCandidates = dnsResults
         .filter((r) => r.signal === "available")
@@ -148,7 +148,7 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
 
           // Legal / trademark gate.
           const legalResult = await filterLegallyAllowed([{ name, fqdn, tld: "com" }]);
-          if (legalResult.length === 0) continue;
+          if (legalResult.allowed.length === 0) continue;
 
           // Save to discoveries.
           await db.insert(discoveriesTable).values({

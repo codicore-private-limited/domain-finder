@@ -179,15 +179,15 @@ router.get("/discoveries", async (req, res): Promise<void> => {
       .where(where)
       .orderBy(desc(discoveriesTable.valueScore))
       .limit(4000);
-    const appraised = pool
+    const sorted = pool
       .map(rowToDiscovery)
-      .filter((d) => (d.estimatedValue ?? 0) >= (Number.isFinite(minValue) ? minValue : 0))
-      .sort((a, b) => (b.estimatedValue ?? 0) - (a.estimatedValue ?? 0));
+      .sort((a, b) => b.valueScore - a.valueScore)
+      .filter((d) => d.valueScore >= (Number.isFinite(minValue) ? minValue : 0));
     res.json({
-      total: appraised.length,
+      total: sorted.length,
       offset,
       limit,
-      items: appraised.slice(offset, offset + limit),
+      items: sorted.slice(offset, offset + limit),
     });
     return;
   }
