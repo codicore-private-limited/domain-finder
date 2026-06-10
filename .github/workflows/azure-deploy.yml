@@ -57,7 +57,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --prod=false
+        run: pnpm install --frozen-lockfile --prod=false --config.onlyBuiltDependencies=esbuild
 
       - name: Build
         run: pnpm run build
@@ -104,7 +104,7 @@ jobs:
           # Install production dependencies in deploy package
           cd deploy-package
           corepack enable
-          pnpm install --frozen-lockfile --prod=false
+          pnpm install --frozen-lockfile --prod=false --config.onlyBuiltDependencies=esbuild
           cd ..
 
       - name: Deploy to Azure Web App
