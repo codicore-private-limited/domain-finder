@@ -75,6 +75,7 @@ jobs:
           mkdir -p deploy-package
 
           # Copy built API server
+          mkdir -p deploy-package/artifacts/api-server
           cp -r artifacts/api-server/dist deploy-package/artifacts/api-server/dist
 
           # Copy built frontend (served by the API server)
