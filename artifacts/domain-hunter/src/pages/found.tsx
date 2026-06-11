@@ -186,44 +186,12 @@ export function FoundDomains() {
         ))}
       </div>
 
-      {/* Export controls */}
-      <div className="mb-4 rounded-xl border border-border/60 bg-card/30 px-4 py-3 flex flex-wrap items-center gap-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
-          <Download className="h-3.5 w-3.5" /> Export
-        </span>
-        <select value={exportSize} onChange={(e) => setExportSize(e.target.value)}
-          className="rounded border border-border/60 bg-background px-2 py-1 text-[12px] text-foreground">
-          {EXPORT_SIZE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-        </select>
-        <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(diamonds), `diamonds-top${exportSize}`)}
-          disabled={diamonds.length === 0}
-          className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-500/10 text-[11px] h-7">
-          💎 Diamonds ({Math.min(diamonds.length, exportSize === "all" ? 9999 : Number(exportSize))})
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(unseen), `unseen-top${exportSize}`)}
-          disabled={unseen.length === 0}
-          className="border-amber-400/40 text-amber-300 hover:bg-amber-500/10 text-[11px] h-7">
-          <Eye className="mr-1 h-3 w-3" /> Unseen ({Math.min(unseen.length, exportSize === "all" ? 9999 : Number(exportSize))})
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(recent24h), `24h-top${exportSize}`)}
-          disabled={recent24h.length === 0}
-          className="border-violet-400/40 text-violet-300 hover:bg-violet-500/10 text-[11px] h-7">
-          <Clock className="mr-1 h-3 w-3" /> Today's ({Math.min(recent24h.length, exportSize === "all" ? 9999 : Number(exportSize))})
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(allItems), `all-top${exportSize}`)}
-          className="border-border/60 text-muted-foreground text-[11px] h-7">
-          All shown ({Math.min(allItems.length, exportSize === "all" ? 9999 : Number(exportSize))})
-        </Button>
-      </div>
+      {/* Filters + Export — ek hi section mein */}
+      <div className="mb-4 rounded-xl border border-border/60 bg-card/30 px-4 py-3 space-y-3">
 
-      {/* Filters */}
-      <div className="mb-4 rounded-xl border border-border/60 bg-card/30 px-4 py-3 flex flex-wrap items-center gap-3">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
-          <Filter className="h-3.5 w-3.5" /> Filters
-        </span>
-
-        {/* Date */}
-        <div className="flex gap-1">
+        {/* Row 1: Date filter + direct export for that date */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground w-12">Date</span>
           {DATE_OPTIONS.map((d) => (
             <button key={d.key} onClick={() => setDateFilter(d.key)}
               className={cn("rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
@@ -232,12 +200,37 @@ export function FoundDomains() {
               {d.label}
             </button>
           ))}
+          {/* Export bar directly next to date filter */}
+          <div className="ml-auto flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] text-muted-foreground">Export:</span>
+            <select value={exportSize} onChange={(e) => setExportSize(e.target.value)}
+              className="rounded border border-border/60 bg-background px-2 py-1 text-[11px] text-foreground">
+              {EXPORT_SIZE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+            {/* Primary: export current filtered view */}
+            <Button size="sm" variant="default" onClick={() => csvExport(getExportItems(allItems), `${dateFilter}-${category}`)}
+              disabled={allItems.length === 0}
+              className="text-[11px] h-7 bg-primary hover:bg-primary/90">
+              <Download className="mr-1 h-3 w-3" />
+              Export current ({Math.min(allItems.length, exportSize === "all" ? 99999 : Number(exportSize))})
+            </Button>
+            {/* Secondary quick exports */}
+            <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(diamonds), "diamonds")}
+              disabled={diamonds.length === 0}
+              className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-500/10 text-[11px] h-7">
+              💎 ({Math.min(diamonds.length, exportSize === "all" ? 99999 : Number(exportSize))})
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => csvExport(getExportItems(unseen), "unseen")}
+              disabled={unseen.length === 0}
+              className="border-amber-400/40 text-amber-300 hover:bg-amber-500/10 text-[11px] h-7">
+              <Eye className="mr-1 h-3 w-3" /> New ({Math.min(unseen.length, exportSize === "all" ? 99999 : Number(exportSize))})
+            </Button>
+          </div>
         </div>
 
-        <div className="h-4 w-px bg-border/60" />
-
-        {/* Category */}
-        <div className="flex flex-wrap gap-1">
+        {/* Row 2: Category + smart toggles */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground w-12">Filter</span>
           {CATEGORIES.map((c) => (
             <button key={c.key} onClick={() => setCategory(c.key)}
               className={cn("rounded px-2.5 py-1 text-[11px] font-medium transition-colors",
@@ -246,23 +239,21 @@ export function FoundDomains() {
               {c.label}
             </button>
           ))}
+          <div className="ml-2 flex gap-1.5">
+            <button onClick={() => setUnseenOnly(!unseenOnly)}
+              className={cn("flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium border transition-colors",
+                unseenOnly ? "border-amber-400/50 bg-amber-500/10 text-amber-200" : "border-border/50 text-muted-foreground hover:border-border"
+              )}>
+              <Eye className="h-3 w-3" /> Unseen only
+            </button>
+            <button onClick={() => setDiamondOnly(!diamondOnly)}
+              className={cn("flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium border transition-colors",
+                diamondOnly ? "border-cyan-400/50 bg-cyan-500/10 text-cyan-200" : "border-border/50 text-muted-foreground hover:border-border"
+              )}>
+              💎 AI only
+            </button>
+          </div>
         </div>
-
-        <div className="h-4 w-px bg-border/60" />
-
-        {/* Smart toggles */}
-        <button onClick={() => setUnseenOnly(!unseenOnly)}
-          className={cn("flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium border transition-colors",
-            unseenOnly ? "border-amber-400/50 bg-amber-500/10 text-amber-200" : "border-border/50 text-muted-foreground hover:border-border"
-          )}>
-          <Eye className="h-3 w-3" /> Unseen only
-        </button>
-        <button onClick={() => setDiamondOnly(!diamondOnly)}
-          className={cn("flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-medium border transition-colors",
-            diamondOnly ? "border-cyan-400/50 bg-cyan-500/10 text-cyan-200" : "border-border/50 text-muted-foreground hover:border-border"
-          )}>
-          💎 AI diamonds only
-        </button>
       </div>
 
       {/* Table */}
