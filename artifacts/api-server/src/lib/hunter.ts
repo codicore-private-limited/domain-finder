@@ -20,7 +20,7 @@ const TELEGRAM_ALERT_THRESHOLD = 96;
 // name frees up — so we keep sweeping the whole hunt pool (good one-word
 // dictionary words + meaningful phrases) and re-probe each name once its last
 // check ages past this window.
-const PHRASE_RECHECK_MS = 6 * 60 * 60 * 1000; // 6 hours
+const PHRASE_RECHECK_MS = 1 * 60 * 60 * 1000; // 1 hour (was 6h — recheck faster so new pool entries get probed continuously)
 
 const CATEGORIES = [
   "ai",
@@ -91,8 +91,8 @@ export interface HunterState {
 }
 
 const RING_SIZE = 250;
-const DEFAULT_BATCH_SIZE = 1000;
-const DEFAULT_CONCURRENCY = 200;
+const DEFAULT_BATCH_SIZE = 2000;
+const DEFAULT_CONCURRENCY = 400;
 const DEFAULT_MIN_SCORE = 0;
 
 class Hunter extends EventEmitter {

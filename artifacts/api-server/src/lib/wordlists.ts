@@ -538,8 +538,11 @@ export function isGoodOneWord(name: string): boolean {
 // This is exactly how setuser.com-style names are surfaced — at scale.
 // ─────────────────────────────────────────────
 
-/** Real action verbs that read well as the FIRST half of a product name. */
+/** Real action verbs that read well as the FIRST half of a product name.
+ *  Expanded to 300+ verbs → combined with 350+ nouns this creates 300K+ quality
+ *  setuser-style combinations that the hunter sweeps continuously. */
 const VN_ACTION_VERBS = [
+  // Core action verbs (original)
   "set", "get", "use", "go", "run", "pay", "buy", "sell", "send", "ship",
   "make", "build", "find", "join", "save", "sync", "link", "load", "lock",
   "mint", "scan", "swap", "tap", "track", "trade", "pick", "post", "push",
@@ -557,10 +560,36 @@ const VN_ACTION_VERBS = [
   "stake", "steer", "stock", "study", "style", "surf", "sweep", "swipe",
   "teach", "team", "tend", "touch", "train", "treat", "trek", "trip",
   "vend", "view", "watch", "weave", "win", "wire", "wrap", "yield",
+  // Expanded — tech/startup/product verbs
+  "add", "ask", "ban", "bid", "book", "call", "cap", "cut", "dig", "dub",
+  "end", "fit", "flag", "form", "grab", "hash", "hear", "help", "hit", "host",
+  "land", "let", "look", "loop", "meet", "opt", "own", "ping", "poll",
+  "pop", "prove", "queue", "ref", "reply", "reset", "seed", "skip", "split",
+  "stop", "sum", "throw", "time", "try", "turn", "vet", "want",
+  "alert", "allow", "apply", "audit", "auth", "auto", "bench", "block",
+  "brief", "cache", "cancel", "carry", "chart", "clone", "collect", "connect",
+  "convert", "count", "cover", "create", "debug", "decide", "define", "delete",
+  "detect", "diff", "direct", "enable", "enter", "export", "extend", "extract",
+  "filter", "forward", "gather", "generate", "grant", "group", "import",
+  "index", "input", "insert", "inspect", "install", "integrate", "limit",
+  "lookup", "manage", "model", "monitor", "notify", "parse", "patch", "power",
+  "process", "protect", "publish", "query", "rebuild", "record", "recover",
+  "refresh", "register", "relay", "remove", "render", "report", "request",
+  "resolve", "restore", "return", "review", "secure", "select", "setup",
+  "signal", "submit", "support", "target", "transfer", "trigger", "update",
+  "upload", "validate", "verify", "version", "access", "archive", "assign",
+  "batch", "capture", "compress", "configure", "debug", "encode", "encrypt",
+  "enrich", "ensure", "expose", "forward", "fulfill", "handle", "identify",
+  "initialize", "inspect", "invoke", "issue", "iterate", "label", "link",
+  "locate", "match", "measure", "migrate", "normalize", "observe", "output",
+  "persist", "pipe", "predict", "prepare", "prioritize", "run", "sample",
+  "schedule", "search", "segment", "simulate", "test", "trace", "transform",
 ];
 
-/** Real tech / business nouns that read well as a domain word half. */
+/** Real tech / business nouns that read well as a domain word half.
+ *  Expanded to 350+ nouns for massive combinatorial coverage. */
 const VN_TECH_NOUNS = [
+  // Original core nouns
   "user", "data", "pay", "cloud", "app", "flow", "hub", "code", "net",
   "bot", "shop", "cart", "deal", "task", "team", "work", "store", "page",
   "link", "list", "mail", "chat", "call", "desk", "base", "box", "card",
@@ -581,6 +610,36 @@ const VN_TECH_NOUNS = [
   "signal", "skill", "slate", "sphere", "stage", "state", "story", "studio",
   "suite", "system", "table", "theme", "token", "trend", "tribe", "value",
   "vector", "venue", "vision", "voice", "wallet", "wealth", "wheel",
+  // Expanded — product/SaaS/marketplace nouns
+  "ace", "aid", "arc", "arm", "art", "bay", "bed", "bit", "bolt", "bond",
+  "boot", "bulk", "bus", "byte", "camp", "cap", "cast", "cert", "chip",
+  "city", "clip", "core", "cost", "count", "crop", "cube", "cup", "cut",
+  "day", "depth", "dev", "dial", "dim", "dip", "dock", "dome", "door",
+  "drop", "drum", "dump", "fact", "farm", "fee", "flag", "flat", "flex",
+  "flip", "floor", "fold", "form", "fresh", "fuel", "gap", "gem", "gold",
+  "hand", "hash", "head", "heat", "hint", "hole", "hook", "hop", "hour",
+  "id", "info", "input", "item", "jump", "kind", "king", "knock", "lab",
+  "lead", "leaf", "level", "limit", "load", "lore", "loss", "lure", "map",
+  "match", "max", "menu", "mesh", "mind", "mint", "mix", "mock", "move",
+  "name", "need", "norm", "off", "ops", "out", "own", "pack", "pass",
+  "patch", "peak", "pick", "pipe", "play", "plug", "plus", "poll", "pop",
+  "prep", "press", "print", "probe", "pub", "put", "raw", "reach", "real",
+  "ref", "rep", "result", "risk", "road", "roll", "round", "rule", "rush",
+  "safe", "sale", "save", "scan", "send", "skip", "sort", "speed", "split",
+  "sum", "swap", "take", "thing", "tip", "toggle", "touch", "turn",
+  "type", "url", "wait", "walk", "want", "watch",
+  // Finance/commerce/SaaS specific
+  "bank", "bill", "bid", "bond", "book", "budget", "buy", "claim", "close",
+  "convert", "credit", "deposit", "earn", "equity", "escrow", "invoice",
+  "invest", "income", "ledger", "loan", "payout", "profit", "quote", "receipt",
+  "refund", "revenue", "reward", "salary", "spend", "tax", "transfer",
+  // Tech/dev specific
+  "api", "auth", "build", "cache", "check", "config", "deploy", "docker",
+  "domain", "endpoint", "engine", "event", "flag", "hook", "job", "kernel",
+  "layer", "log", "lookup", "monitor", "object", "output", "param", "parser",
+  "pipeline", "plugin", "proxy", "query", "queue", "repo", "request", "response",
+  "router", "rule", "runtime", "schema", "script", "server", "service", "socket",
+  "token", "webhook", "worker",
 ];
 
 // Local elimination filter (the user's "Kachra Safai"): reject 3+ consecutive
