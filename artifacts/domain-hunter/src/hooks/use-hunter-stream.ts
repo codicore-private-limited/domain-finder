@@ -190,6 +190,10 @@ export interface Discovery {
   radioTest: boolean;
   rationale: string;
   dnsEvidence: string;
+  isDiamond: boolean;
+  diamondScore: number | null;
+  diamondReason: string | null;
+  viewedAt: string | null;
   discoveredAt: string;
 }
 
@@ -215,6 +219,9 @@ export async function fetchDiscoveries(params: {
   length?: number | null;
   sortBy?: "score" | "value";
   minValue?: number;
+  unseen?: boolean;
+  diamond?: boolean;
+  since?: string | null;
 }): Promise<DiscoveriesResponse> {
   const qs = new URLSearchParams();
   if (params.limit != null) qs.set("limit", String(params.limit));
@@ -225,9 +232,20 @@ export async function fetchDiscoveries(params: {
   if (params.length != null) qs.set("length", String(params.length));
   if (params.sortBy === "value") qs.set("sortBy", "value");
   if (params.minValue != null && params.minValue > 0) qs.set("minValue", String(params.minValue));
+  if (params.unseen) qs.set("unseen", "true");
+  if (params.diamond) qs.set("diamond", "true");
+  if (params.since) qs.set("since", params.since);
   const res = await fetch(`${API_BASE}/discoveries?${qs.toString()}`);
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return (await res.json()) as DiscoveriesResponse;
+}
+
+export async function markAsSeen(id: number): Promise<void> {
+  await fetch(`${API_BASE}/discoveries/${id}/seen`, { method: "POST" });
+}
+
+export async function markAsUnseen(id: number): Promise<void> {
+  await fetch(`${API_BASE}/discoveries/${id}/seen`, { method: "DELETE" });
 }
 
 export interface NewsEvent {

@@ -10,6 +10,7 @@ import { logger } from "./logger";
 import { queueTelegramAlert, sendStartupAlert } from "./telegram";
 import { getTrendKeywordsForCategory } from "./news/ingest";
 import { getSeedKeywordsForCategory } from "./news/extractor";
+import { evaluateDiamond, alertDiamond } from "./news/llm-diamond-filter";
 import { filterLegallyAllowed } from "./legal/gate";
 import { isSellableDomain, HUNT_POOL } from "./wordlists";
 
@@ -667,6 +668,10 @@ class Hunter extends EventEmitter {
           valueScore: d.score.valueScore,
         }),
         dnsEvidence: d.result.evidence,
+        // LLM evaluation placeholders — filled asynchronously below.
+        isDiamond: false,
+        diamondScore: null as string | null,
+        diamondReason: null as string | null,
       }));
       try {
         const inserted = await db
@@ -680,23 +685,48 @@ class Hunter extends EventEmitter {
         this.bumpStat("perStrategy", strategy, "diamonds", newCount);
         this.bumpStat("perCategory", category, "diamonds", newCount);
 
-        // Emit individual events for newly-saved diamonds (capped to top 8).
+        // Async LLM diamond evaluation for each newly saved domain.
+        // Runs in background — never blocks the main hunt loop.
+        for (const d of newDiamonds) {
+          void (async () => {
+            try {
+              const evaluation = await evaluateDiamond(d.name, "com", {
+                category,
+                trendKeywords: trends,
+              });
+              if (!evaluation) return;
+              // Persist LLM score.
+              await db
+                .update(discoveriesTable)
+                .set({
+                  isDiamond: evaluation.isDiamond,
+                  diamondScore: String(evaluation.score),
+                  diamondReason: evaluation.reason,
+                })
+                .where(sql`${discoveriesTable.fqdn} = ${d.fqdn}`);
+              // 🔔 Telegram alert ONLY for LLM-confirmed diamonds.
+              if (evaluation.isDiamond) {
+                await alertDiamond(d.name, "com", evaluation, d.result.evidence);
+                this.emitEvent({
+                  kind: "discovery",
+                  message: `💎 AI DIAMOND: ${d.fqdn} (LLM score ${evaluation.score}/100) — ${evaluation.reason}`,
+                  data: { fqdn: d.fqdn, diamondScore: evaluation.score, reason: evaluation.reason },
+                });
+              }
+            } catch (err) {
+              logger.debug({ err, fqdn: d.fqdn }, "LLM diamond eval error");
+            }
+          })();
+        }
+
+        // 🔔 Old score-based Telegram alert (kept as fallback when LLM is unavailable).
         const newDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         for (const d of newDiamonds.slice(0, 8)) {
           this.emitEvent({
             kind: "discovery",
             message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${strategy})`,
-            data: {
-              fqdn: d.fqdn,
-              category,
-              strategy,
-              valueScore: d.score.valueScore,
-              pattern: d.score.pattern,
-              evidence: d.result.evidence,
-              breakdown: d.score.breakdown,
-            },
+            data: { fqdn: d.fqdn, category, strategy, valueScore: d.score.valueScore },
           });
-          // 🔔 Telegram alert for elite diamonds only (≥96 score)
           if (d.score.valueScore >= TELEGRAM_ALERT_THRESHOLD) {
             queueTelegramAlert({
               name: d.name,
@@ -706,12 +736,8 @@ class Hunter extends EventEmitter {
               valueScore: d.score.valueScore,
               pattern: d.score.pattern,
               rationale: buildRationale({
-                name: d.name,
-                tld: "com",
-                category,
-                strategy,
-                pattern: d.score.pattern,
-                valueScore: d.score.valueScore,
+                name: d.name, tld: "com", category, strategy,
+                pattern: d.score.pattern, valueScore: d.score.valueScore,
               }),
               dnsEvidence: d.result.evidence,
             });

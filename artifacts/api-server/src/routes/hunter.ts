@@ -35,6 +35,14 @@ function rowToDiscovery(r: DiscoveryRow) {
     radioTest: r.radioTest === 1,
     rationale: r.rationale,
     dnsEvidence: r.dnsEvidence,
+    isDiamond: r.isDiamond ?? false,
+    diamondScore: r.diamondScore != null ? Number(r.diamondScore) : null,
+    diamondReason: r.diamondReason ?? null,
+    viewedAt: r.viewedAt instanceof Date
+      ? r.viewedAt.toISOString()
+      : r.viewedAt
+        ? new Date(r.viewedAt as string).toISOString()
+        : null,
     discoveredAt:
       r.discoveredAt instanceof Date
         ? r.discoveredAt.toISOString()
@@ -155,20 +163,28 @@ router.get("/discoveries", async (req, res): Promise<void> => {
       : null;
   const lengthFilter =
     typeof req.query.length === "string" ? Number(req.query.length) : null;
+  // New smart filters.
+  const unseenOnly = req.query.unseen === "true";
+  const diamondOnly = req.query.diamond === "true";
+  const sinceDate =
+    typeof req.query.since === "string" ? new Date(req.query.since) : null;
 
   const conds: ReturnType<typeof gte>[] = [gte(discoveriesTable.valueScore, String(minScore))];
   if (category) conds.push(eq(discoveriesTable.category, category));
   if (strategy) conds.push(eq(discoveriesTable.strategy, strategy));
-  if (lengthFilter && lengthFilter >= 5 && lengthFilter <= 7) {
+  if (lengthFilter && lengthFilter >= 3 && lengthFilter <= 15) {
     conds.push(eq(discoveriesTable.length, lengthFilter));
+  }
+  if (unseenOnly) conds.push(sql`${discoveriesTable.viewedAt} IS NULL`);
+  if (diamondOnly) conds.push(sql`${discoveriesTable.isDiamond} = true`);
+  if (sinceDate && !Number.isNaN(sinceDate.getTime())) {
+    conds.push(sql`${discoveriesTable.discoveredAt} >= ${sinceDate.toISOString()}`);
   }
 
   const where = conds.length === 1 ? conds[0] : and(...conds);
 
-  const cacheKey = `${minScore}|${category ?? ""}|${strategy ?? ""}|${lengthFilter ?? ""}`;
+  const cacheKey = `${minScore}|${category ?? ""}|${strategy ?? ""}|${lengthFilter ?? ""}|${unseenOnly}|${diamondOnly}|${sinceDate?.toISOString() ?? ""}`;
 
-  // Optional: rank by our appraisal estimated value instead of score. We fetch a
-  // wide window, appraise, sort by $ value, then page in JS.
   const sortByValue = req.query.sortBy === "value";
   const minValue = Number(req.query.minValue ?? 0);
 
@@ -183,12 +199,7 @@ router.get("/discoveries", async (req, res): Promise<void> => {
       .map(rowToDiscovery)
       .sort((a, b) => b.valueScore - a.valueScore)
       .filter((d) => d.valueScore >= (Number.isFinite(minValue) ? minValue : 0));
-    res.json({
-      total: sorted.length,
-      offset,
-      limit,
-      items: sorted.slice(offset, offset + limit),
-    });
+    res.json({ total: sorted.length, offset, limit, items: sorted.slice(offset, offset + limit) });
     return;
   }
 
@@ -197,7 +208,7 @@ router.get("/discoveries", async (req, res): Promise<void> => {
       .select()
       .from(discoveriesTable)
       .where(where)
-      .orderBy(desc(discoveriesTable.valueScore), desc(discoveriesTable.discoveredAt))
+      .orderBy(desc(discoveriesTable.isDiamond), desc(discoveriesTable.valueScore), desc(discoveriesTable.discoveredAt))
       .limit(limit)
       .offset(offset),
     cachedCount(cacheKey, async () => {
@@ -209,12 +220,23 @@ router.get("/discoveries", async (req, res): Promise<void> => {
     }),
   ]);
 
-  res.json({
-    total,
-    offset,
-    limit,
-    items: rows.map(rowToDiscovery),
-  });
+  res.json({ total, offset, limit, items: rows.map(rowToDiscovery) });
+});
+
+/** Mark a discovery as "seen" so it gets filtered from the unseen view. */
+router.post("/discoveries/:id/seen", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
+  await db.update(discoveriesTable).set({ viewedAt: new Date() }).where(eq(discoveriesTable.id, id));
+  res.json({ ok: true });
+});
+
+/** Un-mark a discovery (un-seen). */
+router.delete("/discoveries/:id/seen", async (req, res): Promise<void> => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
+  await db.update(discoveriesTable).set({ viewedAt: null }).where(eq(discoveriesTable.id, id));
+  res.json({ ok: true });
 });
 
 export default router;
