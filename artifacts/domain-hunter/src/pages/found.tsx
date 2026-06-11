@@ -64,18 +64,22 @@ function CopyBtn({ text }: { text: string }) {
   );
 }
 
-function csvExport(items: Discovery[]) {
-  const header = "fqdn,name,category,length,score,diamond,ai_score,ai_reason,radio_test,discovered_at,seen,register_url";
+function csvExport(items: Discovery[], label = "") {
+  const header = "fqdn,name,category,length,score,diamond,ai_score,ai_reason,radio_test,discovered_at,seen,namecheap_url,godaddy_url";
   const rows = items.map((d) => [
     d.fqdn, d.name, d.category, d.length, d.valueScore,
     d.isDiamond ? "yes" : "no",
-    d.diamondScore ?? "", (d.diamondReason ?? "").replace(/,/g, ";"),
-    d.radioTest ? "pass" : "-", d.discoveredAt, d.viewedAt ? "yes" : "no",
+    d.diamondScore ?? "", `"${(d.diamondReason ?? "").replace(/"/g, "\\'")}"`,
+    d.radioTest ? "pass" : "-",
+    d.discoveredAt.slice(0, 16).replace("T", " "),
+    d.viewedAt ? "seen" : "new",
     `https://www.namecheap.com/domains/registration/results/?domain=${d.fqdn}`,
+    `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${d.fqdn}`,
   ].join(","));
   const blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-  a.download = `diamonds-${new Date().toISOString().slice(0,10)}-${items.length}.csv`;
+  const suffix = label ? `-${label}` : "";
+  a.download = `diamonds${suffix}-${new Date().toISOString().slice(0,10)}-${items.length}.csv`;
   a.click(); URL.revokeObjectURL(a.href);
 }
 
@@ -147,10 +151,22 @@ export function FoundDomains() {
             <RefreshCw className={cn("mr-1 h-3.5 w-3.5", isLoading && "animate-spin")} /> Refresh
           </Button>
           {items.length > 0 && (
-            <Button size="sm" variant="outline" onClick={() => csvExport(items)}
-              className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/10">
-              <Download className="mr-1 h-3.5 w-3.5" /> Export CSV ({items.length})
-            </Button>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <Button size="sm" variant="outline" onClick={() => csvExport(diamonds, "diamonds-only")}
+                disabled={diamonds.length === 0}
+                className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-500/10 text-[11px]">
+                <Download className="mr-1 h-3.5 w-3.5" /> 💎 Diamonds ({diamonds.length})
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => csvExport(unseen, "unseen")}
+                disabled={unseen.length === 0}
+                className="border-amber-400/40 text-amber-300 hover:bg-amber-500/10 text-[11px]">
+                <Download className="mr-1 h-3.5 w-3.5" /> New unseen ({unseen.length})
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => csvExport(items, dateFilter)}
+                className="border-border/60 text-muted-foreground hover:text-foreground text-[11px]">
+                <Download className="mr-1 h-3.5 w-3.5" /> All shown ({items.length})
+              </Button>
+            </div>
           )}
         </div>
       </div>

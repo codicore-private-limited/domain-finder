@@ -79,16 +79,13 @@ class NewsIngest extends EventEmitter {
       logger.error({ err }, "Seed extraction failed");
     }
 
-    // Run the LLM-powered domain suggester: seeds → candidate names → DNS/RDAP
-    // check → save as discoveries. Runs async, never blocks the ingest cycle.
-    // Only run every 2nd ingest cycle to avoid hammering the LLM API.
-    if (this.state.runs % 2 === 0) {
-      runDomainSuggester().then((r) => {
-        if (r.saved > 0) {
-          logger.info(r, "LLM domain suggester: new names found from news seeds");
-        }
-      }).catch((err) => logger.error({ err }, "Domain suggester failed"));
-    }
+    // Run LLM diamond suggester: seeds → AI quality gate → DNS/RDAP → Telegram.
+    // Runs async on EVERY ingest cycle (not just every 2nd) so diamonds are found ASAP.
+    runDomainSuggester().then((r) => {
+      if (r.saved > 0 || r.generated > 0) {
+        logger.info(r, "LLM diamond suggester cycle");
+      }
+    }).catch((err) => logger.error({ err }, "Domain suggester failed"));
 
     this.state.lastRunAt = new Date().toISOString();
     this.state.lastIngested = result.inserted;
