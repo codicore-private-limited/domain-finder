@@ -544,7 +544,9 @@ class Hunter extends EventEmitter {
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
-    this.bumpStat("perStrategy", strategy, "generated", batch.length);
+    for (const item of batch) {
+      this.bumpStat("perStrategy", item.strategy, "generated");
+    }
     this.bumpStat("perCategory", category, "generated", batch.length);
 
     if (batch.length === 0) {
@@ -604,7 +606,9 @@ class Hunter extends EventEmitter {
     }
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
-    this.bumpStat("perStrategy", strategy, "checked", results.length);
+    for (const item of passing) {
+      this.bumpStat("perStrategy", item.strategy, "checked");
+    }
     this.bumpStat("perCategory", category, "checked", results.length);
 
     // Bulk persist to dns_cache.
@@ -715,7 +719,7 @@ class Hunter extends EventEmitter {
           name: d.name,
           tld: "com",
           category,
-          strategy,
+          strategy: d.strategy,
           pattern: d.score.pattern,
           valueScore: d.score.valueScore,
         }),
@@ -735,7 +739,9 @@ class Hunter extends EventEmitter {
         const insertedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         const newCount = insertedSet.size;
         this.state.totalDiscoveries += newCount;
-        this.bumpStat("perStrategy", strategy, "diamonds", newCount);
+        for (const d of insertedDiamonds) {
+          this.bumpStat("perStrategy", d.strategy, "diamonds");
+        }
         this.bumpStat("perCategory", category, "diamonds", newCount);
 
         // Async LLM diamond evaluation for each newly saved domain.
