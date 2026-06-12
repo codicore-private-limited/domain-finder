@@ -212,6 +212,9 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
           const evaluation = await evaluateDiamond(name, "com", {
             category: seed.category,
             trendKeywords: [seed.keyword],
+          }).catch((err) => {
+            logger.debug({ err, fqdn }, "LLM diamond evaluation failed");
+            return null;
           });
 
           const formattedEvaluation = formatEvaluation(evaluation);

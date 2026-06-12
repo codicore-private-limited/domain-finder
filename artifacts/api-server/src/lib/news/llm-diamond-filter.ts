@@ -31,6 +31,9 @@ const HIGH_INTENT_KEYWORDS = [
   "secure", "security", "shop", "trade", "travel", "vault", "wallet", "wealth",
 ];
 
+// These are only used to fast-reject obviously ordinary two-word combos when
+// both sides are low-intent and the overall name lacks any stronger commercial
+// keyword. A single word from this list is not enough to reject a name.
 const LOW_SIGNAL_WORDS = new Set([
   "tab", "tag", "tile", "line", "mode", "runtime", "loop", "slot", "lane", "pool",
   "span", "tube", "wire", "note", "table", "sheet", "scene", "slate", "theme",
