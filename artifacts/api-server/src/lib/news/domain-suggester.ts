@@ -10,6 +10,7 @@ import { checkTrademarkRisk } from "../trademark";
 import { filterLegallyAllowed } from "../legal/gate";
 import { buildRationale } from "../groq";
 import { alertDiamond, evaluateDiamond } from "./llm-diamond-filter";
+import type { DiamondEvaluation } from "./llm-diamond-filter";
 import type { DomainSeedRow } from "@workspace/db";
 
 /**
@@ -116,7 +117,7 @@ function fallbackGenerate(keyword: string): string[] {
     .slice(0, 8);
 }
 
-function formatEvaluation(evaluation: ReturnType<typeof evaluateDiamond> extends Promise<infer T> ? T : never): {
+function formatEvaluation(evaluation: DiamondEvaluation | null): {
   diamondReason: string | null;
   rationaleSuffix: string;
 } {

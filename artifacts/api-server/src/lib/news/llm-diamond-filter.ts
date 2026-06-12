@@ -26,10 +26,9 @@ const DIAMOND_THRESHOLD = Number.isFinite(parsedDiamondThreshold)
   : 88;
 
 const HIGH_INTENT_KEYWORDS = [
-  "ai", "agent", "auth", "bank", "capital", "care", "cash", "clinic", "cloud", "credit",
-  "crypto", "data", "fund", "health", "id", "identity", "invest", "legal", "loan", "market",
-  "med", "pay", "robot", "secure", "security", "shop", "trade", "travel", "vault", "wallet",
-  "wealth",
+  "agent", "auth", "bank", "capital", "care", "cash", "clinic", "cloud", "credit", "crypto",
+  "data", "fund", "health", "identity", "invest", "legal", "loan", "market", "pay", "robot",
+  "secure", "security", "shop", "trade", "travel", "vault", "wallet", "wealth",
 ];
 
 const LOW_SIGNAL_WORDS = new Set([
@@ -39,11 +38,7 @@ const LOW_SIGNAL_WORDS = new Set([
 ]);
 
 function hasHighIntentKeyword(name: string): boolean {
-  return HIGH_INTENT_KEYWORDS.some((keyword) => (
-    keyword.length < 4
-      ? name.startsWith(keyword) || name.endsWith(keyword)
-      : name.includes(keyword)
-  ));
+  return HIGH_INTENT_KEYWORDS.some((keyword) => name.includes(keyword));
 }
 
 function ordinaryTwoWordCombo(name: string): string[] | null {
@@ -154,11 +149,12 @@ Return ONLY valid JSON:
 
     const score = Math.max(0, Math.min(100, Math.round(result.score)));
     const verdict = String(result.verdict ?? "").trim().toLowerCase();
-    const normalizedVerdict = verdict === "diamond"
-      ? "investment_grade"
-      : verdict === "investment_grade" || verdict === "decent" || verdict === "skip"
-        ? verdict
-        : "skip";
+    let normalizedVerdict: "investment_grade" | "decent" | "skip" = "skip";
+    if (verdict === "diamond" || verdict === "investment_grade") {
+      normalizedVerdict = "investment_grade";
+    } else if (verdict === "decent") {
+      normalizedVerdict = "decent";
+    }
     const isDiamond = normalizedVerdict === "investment_grade" && score >= DIAMOND_THRESHOLD;
 
     return {
