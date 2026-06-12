@@ -9,6 +9,7 @@ import { scoreCandidate } from "../scoring";
 import { checkTrademarkRisk } from "../trademark";
 import { filterLegallyAllowed } from "../legal/gate";
 import { buildRationale } from "../groq";
+import { alertDiamond, evaluateDiamond } from "./llm-diamond-filter";
 import type { DomainSeedRow } from "@workspace/db";
 
 /**
@@ -188,6 +189,21 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
           const legalResult = await filterLegallyAllowed([{ name, fqdn, tld: "com" }]);
           if (legalResult.allowed.length === 0) continue;
 
+          const evaluation = await evaluateDiamond(name, "com", {
+            category: seed.category,
+            trendKeywords: [seed.keyword],
+          });
+
+          const diamondReason = evaluation
+            ? [
+              evaluation.reason,
+              evaluation.factors.length > 0 ? `Factors: ${evaluation.factors.join(" · ")}` : "",
+            ].filter(Boolean).join(" — ")
+            : null;
+          const storedRationale = evaluation
+            ? `${rationale} [AI eval ${evaluation.score}/100: ${evaluation.reason}${evaluation.factors.length > 0 ? ` | ${evaluation.factors.join(" · ")}` : ""}]`
+            : `[AI evaluation unavailable] ${rationale}`;
+
           await db.insert(discoveriesTable).values({
             fqdn, name, tld: "com",
             category: seed.category,
@@ -197,12 +213,11 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             valueScore: String(score.valueScore),
             memorability: score.memorability,
             radioTest: score.radioTest ? 1 : 0,
-            rationale: `[LLM-generated from "${seed.keyword}"] ${rationale}`,
+            rationale: `[LLM-generated from "${seed.keyword}"] ${storedRationale}`,
             dnsEvidence: rdap.evidence,
-            // Mark as diamond immediately — LLM already applied 50-factor gate
-            isDiamond: true,
-            diamondScore: "80",
-            diamondReason: `AI-selected from news trend "${seed.keyword}" (${seed.origin}) — passed 50-factor quality gate during generation`,
+            isDiamond: evaluation?.isDiamond ?? false,
+            diamondScore: evaluation ? String(evaluation.score) : null,
+            diamondReason,
           }).onConflictDoNothing({ target: discoveriesTable.fqdn });
 
           await db.insert(dnsCacheTable).values({
@@ -212,35 +227,16 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             set: { signal: sql`excluded.signal`, evidence: sql`excluded.evidence`, checkedAt: sql`excluded.checked_at` },
           });
 
-          // 🔔 DIRECT Telegram alert — no delay, no queue, immediate
-          const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
-          const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
-          if (BOT_TOKEN && CHAT_ID) {
-            const lines = [
-              `💎 <b>DIAMOND ALERT — ${fqdn.toUpperCase()}</b>`,
-              ``,
-              `🤖 <b>AI Quality Gate:</b> PASSED (50 factors checked)`,
-              `🌊 <b>Source:</b> ${seed.keyword} (${seed.origin})`,
-              `📊 <b>Score:</b> ${score.valueScore}/100`,
-              ``,
-              `<b>🚀 Register NOW before someone else does:</b>`,
-              `• <a href="https://www.namecheap.com/domains/registration/results/?domain=${fqdn}">Namecheap</a>`,
-              `• <a href="https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${fqdn}">GoDaddy</a>`,
-              `• <a href="https://www.name.com/domain/search/${fqdn}">Name.com</a>`,
-              ``,
-              `✅ <i>RDAP verified — genuinely unregistered right now</i>`,
-            ];
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ chat_id: CHAT_ID, text: lines.join("\n"), parse_mode: "HTML", disable_web_page_preview: true }),
-              signal: AbortSignal.timeout(15000),
-            }).catch((err) => logger.warn({ err }, "Telegram send failed"));
+          if (evaluation?.isDiamond) {
+            await alertDiamond(name, "com", evaluation, rdap.evidence);
           }
 
           saved++;
           knownFqdns.add(fqdn);
-          logger.info({ fqdn, seed: seed.keyword }, "💎 LLM diamond saved + Telegram sent");
+          logger.info(
+            { fqdn, seed: seed.keyword, isDiamond: evaluation?.isDiamond ?? false, diamondScore: evaluation?.score ?? null },
+            evaluation?.isDiamond ? "💎 LLM diamond saved + Telegram sent" : "Available LLM candidate saved",
+          );
         } catch (err) {
           logger.debug({ err, fqdn }, "RDAP check failed");
         }

@@ -20,8 +20,38 @@ export interface DiamondEvaluation {
   factors: string[];    // list of key positive/negative signals
 }
 
-// Only names scoring 72+ get Telegram alerts. Conservative — avoids false alarms.
-const DIAMOND_THRESHOLD = 72;
+const parsedDiamondThreshold = Number(process.env.DIAMOND_THRESHOLD ?? 88);
+const DIAMOND_THRESHOLD = Number.isFinite(parsedDiamondThreshold)
+  ? Math.max(0, Math.min(100, parsedDiamondThreshold))
+  : 88;
+
+const HIGH_INTENT_KEYWORDS = [
+  "ai", "agent", "auth", "bank", "capital", "care", "cash", "clinic", "cloud", "credit",
+  "crypto", "data", "fund", "health", "id", "identity", "invest", "legal", "loan", "market",
+  "med", "pay", "robot", "secure", "security", "shop", "trade", "travel", "vault", "wallet",
+  "wealth",
+];
+
+const LOW_SIGNAL_WORDS = new Set([
+  "tab", "tag", "tile", "line", "mode", "runtime", "loop", "slot", "lane", "pool",
+  "span", "tube", "wire", "note", "table", "sheet", "scene", "slate", "theme",
+  "vector", "pair", "route",
+]);
+
+function hasHighIntentKeyword(name: string): boolean {
+  return HIGH_INTENT_KEYWORDS.some((keyword) => name.includes(keyword));
+}
+
+function ordinaryTwoWordCombo(name: string): string[] | null {
+  for (let i = 3; i <= name.length - 3; i += 1) {
+    const left = name.slice(0, i);
+    const right = name.slice(i);
+    if (LOW_SIGNAL_WORDS.has(left) && LOW_SIGNAL_WORDS.has(right)) {
+      return [left, right];
+    }
+  }
+  return null;
+}
 
 // Skip LLM for names already known to be weak (saves API budget).
 function quickReject(name: string): { reject: boolean; reason: string } {
@@ -32,6 +62,15 @@ function quickReject(name: string): { reject: boolean; reason: string } {
   if (/[bcdfghjklmnpqrstvwxyz]{3}/i.test(name)) return { reject: true, reason: "awkward consonant cluster" };
   // Starts or ends with a number
   if (/^\d|\d$/.test(name)) return { reject: true, reason: "starts/ends with digit" };
+  if (!hasHighIntentKeyword(name)) {
+    const weakCombo = ordinaryTwoWordCombo(name);
+    if (weakCombo) {
+      return {
+        reject: true,
+        reason: `ordinary low-intent combo (${weakCombo[0]} + ${weakCombo[1]})`,
+      };
+    }
+  }
   return { reject: false, reason: "" };
 }
 
@@ -59,57 +98,39 @@ export async function evaluateDiamond(
   const trendCtx = context?.trendKeywords?.slice(0, 5).join(", ") ?? "general";
   const cat = context?.category ?? "tech";
 
-  const prompt = `You are a professional domain investor with 15 years of experience. Evaluate the .com domain: "${name}.com"
+  const prompt = `You are a highly selective domain investor. Evaluate "${name}.${tld}" for resale quality.
 
-Score it from 0-100 based on these 50 criteria (be VERY strict — most domains fail):
+Classify it using these strict buckets:
+- investment_grade: true diamond only. Must have a broad buyer pool, strong startup/company feel, clear commercial intent, and realistic $2k+ end-user resale potential.
+- decent: pronounceable and somewhat brandable, but ordinary, niche, limited-buyer, or missing clear commercial urgency.
+- skip: awkward, weak, low buyer pool, low intent, negative, spammy, adult, or trademark-risky.
 
-LENGTH & STRUCTURE (20 pts):
-1. Character count (5-7 = 20, 8-9 = 12, 10+ = 5)
-2. No hyphens (5 pts each)
-3. No numbers (5 pts each)
-4. Syllable count 1-3 ideal (5 pts)
-5. All lowercase letters only (5 pts)
+Critical scoring rules:
+- Most AI-generated domains should score below 60.
+- Scores 60-79 should be uncommon and reserved for above-average names.
+- Scores 80-87 can be strong but still NOT investment_grade if the buyer pool is narrow or the name feels ordinary.
+- Only exceptional domains should reach ${DIAMOND_THRESHOLD}+ and investment_grade.
+- Never reward a domain just because it is two real words.
+- Random verb+noun or noun+noun combos like linetile, modetab, tagruntime, linepool, notewire, or similar ordinary generated names should usually be skip or low decent.
+- Penalize names that sound like internal tooling, technical fragments, UI labels, filler nouns, or weak combinations with no clear high-value buyer category.
 
-PHONETICS & MEMORABILITY (20 pts):
-6. Easy to say out loud / radio test (10 pts)
-7. Easy to spell when heard (5 pts)
-8. No awkward consonant combos (5 pts)
-9. Memorable after hearing once (10 pts)
-10. No ambiguous letters (l/1, O/0) (5 pts)
+Evaluate these factors with strict judgment:
+1. Broad buyer pool across multiple real companies or startups
+2. Strong commercial or high-intent category fit
+3. Clean phonetics, spelling, and memorability
+4. Premium company-brand feel rather than auto-generated phrase feel
+5. Realistic end-user resale potential above $2k
+6. No obvious trademark, adult, spam, scam, or negative-risk signals
 
-COMMERCIAL VALUE (25 pts):
-11. Contains high-CPC industry keyword (pay/bank/loan/health/ai/cloud/crypto/law/estate) = 20 pts
-12. Contains mid-value keyword (tech/data/hub/flow/team/app/code/shop) = 12 pts
-13. Suitable for a startup product name (10 pts)
-14. Global brand appeal (not region-specific) (5 pts)
-15. No trademark collision risk (10 pts)
-
-BRANDABILITY (20 pts):
-16. Sounds like a real company name (10 pts)
-17. Two clear, recognizable words (10 pts)
-18. Action word + product word (setuser, payflow etc.) = 10 pts
-19. Clean, professional feel (5 pts)
-20. Not a generic filler combo (flagrep, tagloop = -15 pts)
-
-RESALE POTENTIAL (15 pts):
-21. A startup would genuinely want this domain (10 pts)
-22. Comparable similar names sell for >$1000 (5 pts)
-23. Multiple industries could use it (5 pts)
-24. Not over-specific (not tied to one tiny niche) (5 pts)
-25. Would look good on a business card/billboard (5 pts)
-
-Current trend context: ${trendCtx} (category: ${cat})
+Context: category=${cat}; trend_keywords=${trendCtx}
 
 Return ONLY valid JSON:
 {
   "score": <0-100>,
-  "verdict": "diamond" | "decent" | "skip",
-  "reason": "<one sentence why>",
-  "top_factors": ["<up to 3 key signals>"]
-}
-
-Diamond = 72+. Decent = 50-71. Skip = <50.
-IMPORTANT: Most domains should score <50. Only genuine investment-grade names score 72+.`;
+  "verdict": "investment_grade" | "decent" | "skip",
+  "reason": "<one sentence>",
+  "top_factors": ["<up to 4 short factors>"]
+}`;
 
   try {
     const result = await chatJSON<{
@@ -128,7 +149,9 @@ IMPORTANT: Most domains should score <50. Only genuine investment-grade names sc
     if (!result || typeof result.score !== "number") return null;
 
     const score = Math.max(0, Math.min(100, Math.round(result.score)));
-    const isDiamond = score >= DIAMOND_THRESHOLD;
+    const verdict = String(result.verdict ?? "").trim().toLowerCase();
+    const normalizedVerdict = verdict === "diamond" ? "investment_grade" : verdict;
+    const isDiamond = normalizedVerdict === "investment_grade" && score >= DIAMOND_THRESHOLD;
 
     return {
       score,

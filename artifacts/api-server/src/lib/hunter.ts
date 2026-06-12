@@ -680,6 +680,7 @@ class Hunter extends EventEmitter {
           .onConflictDoNothing()
           .returning({ fqdn: discoveriesTable.fqdn });
         const insertedSet = new Set(inserted.map((r) => r.fqdn));
+        const insertedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         const newCount = insertedSet.size;
         this.state.totalDiscoveries += newCount;
         this.bumpStat("perStrategy", strategy, "diamonds", newCount);
@@ -687,7 +688,7 @@ class Hunter extends EventEmitter {
 
         // Async LLM diamond evaluation for each newly saved domain.
         // Runs in background — never blocks the main hunt loop.
-        for (const d of newDiamonds) {
+        for (const d of insertedDiamonds) {
           void (async () => {
             try {
               const evaluation = await evaluateDiamond(d.name, "com", {
