@@ -100,6 +100,8 @@ const RING_SIZE = 250;
 const DEFAULT_BATCH_SIZE = 2000;
 const DEFAULT_CONCURRENCY = 400;
 const DEFAULT_MIN_SCORE = 0;
+const BACKFILL_MAX_ROUNDS = 5;
+const BACKFILL_SEED_STEP = 0x9e3779b1; // Golden-ratio hash step spreads generated names across cycles.
 
 class Hunter extends EventEmitter {
   private state: HunterState = {
@@ -249,9 +251,9 @@ class Hunter extends EventEmitter {
         category,
         trendKeywords,
         limit - out.length,
-        (Date.now() ^ (this.state.cycle * 0x9e3779b1)) >>> 0,
+        (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0,
         exclude,
-        5,
+        BACKFILL_MAX_ROUNDS,
       ).names;
       for (const name of generated) {
         if (!alreadyQueued.has(name) && !out.includes(name)) out.push(name);
@@ -540,7 +542,10 @@ class Hunter extends EventEmitter {
       ...freshBackfill.map((name) => ({ name, strategy })),
     ];
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
-    const evaluated = HUNT_POOL.length + (freshBackfill.length > 0 ? requested * 5 : 0);
+    const backfillEvaluated = freshBackfill.length > 0
+      ? requested * BACKFILL_MAX_ROUNDS
+      : 0;
+    const evaluated = HUNT_POOL.length + backfillEvaluated;
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
