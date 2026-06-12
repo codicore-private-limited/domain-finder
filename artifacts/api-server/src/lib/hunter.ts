@@ -620,14 +620,26 @@ class Hunter extends EventEmitter {
 
     let registered = 0;
     let unknown = 0;
-    const dnsCandidates: { name: string; fqdn: string; result: DnsCheckResult; score: ReturnType<typeof scoreCandidate> }[] = [];
+    const dnsCandidates: {
+      name: string;
+      fqdn: string;
+      strategy: Strategy;
+      result: DnsCheckResult;
+      score: ReturnType<typeof scoreCandidate>;
+    }[] = [];
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
       const p = passing[i]!;
       if (r.signal === "registered") registered++;
       else if (r.signal === "unknown") unknown++;
       else if (r.signal === "available") {
-        dnsCandidates.push({ name: p.name, fqdn: r.fqdn, result: r, score: p.score });
+        dnsCandidates.push({
+          name: p.name,
+          fqdn: r.fqdn,
+          strategy: p.strategy,
+          result: r,
+          score: p.score,
+        });
       }
     }
     this.state.totalRegistered += registered;
