@@ -234,9 +234,10 @@ class Hunter extends EventEmitter {
     strategy: Strategy,
     trendKeywords: string[],
     alreadyQueued: Set<string>,
-  ): string[] {
-    if (limit <= 0) return [];
+  ): { names: string[]; evaluated: number } {
+    if (limit <= 0) return { names: [], evaluated: 0 };
     const out: string[] = [];
+    let evaluated = 0;
     const strategies: Strategy[] = [
       strategy,
       ...STRATEGIES.filter((s) => s !== strategy),
@@ -246,21 +247,25 @@ class Hunter extends EventEmitter {
       const exclude = new Set(this.everSearchedBare);
       for (const name of alreadyQueued) exclude.add(name);
       for (const name of out) exclude.add(name);
+      // Mix wall-clock time with cycle number so each cycle starts from a varied
+      // but deterministic seed for the generator.
+      const seed = (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0;
       const generated = generateBulk(
         candidateStrategy,
         category,
         trendKeywords,
         limit - out.length,
-        (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0,
+        seed,
         exclude,
         BACKFILL_MAX_ROUNDS,
-      ).names;
-      for (const name of generated) {
+      );
+      evaluated += generated.evaluated;
+      for (const name of generated.names) {
         if (!alreadyQueued.has(name) && !out.includes(name)) out.push(name);
         if (out.length >= limit) break;
       }
     }
-    return out;
+    return { names: out, evaluated };
   }
 
   private emitEvent(ev: Omit<HunterEvent, "id" | "ts">) {
@@ -539,13 +544,10 @@ class Hunter extends EventEmitter {
     );
     const batch: ProbeItem[] = [
       ...priorityBatch.map((name) => ({ name, strategy: "real_phrase" as Strategy })),
-      ...freshBackfill.map((name) => ({ name, strategy })),
+      ...freshBackfill.names.map((name) => ({ name, strategy })),
     ];
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
-    const backfillEvaluated = freshBackfill.length > 0
-      ? requested * BACKFILL_MAX_ROUNDS
-      : 0;
-    const evaluated = HUNT_POOL.length + backfillEvaluated;
+    const evaluated = HUNT_POOL.length + freshBackfill.evaluated;
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
