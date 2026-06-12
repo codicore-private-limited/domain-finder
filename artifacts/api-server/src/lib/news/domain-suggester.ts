@@ -116,6 +116,25 @@ function fallbackGenerate(keyword: string): string[] {
     .slice(0, 8);
 }
 
+function formatEvaluation(evaluation: ReturnType<typeof evaluateDiamond> extends Promise<infer T> ? T : never): {
+  diamondReason: string | null;
+  rationaleSuffix: string;
+} {
+  if (!evaluation) {
+    return {
+      diamondReason: null,
+      rationaleSuffix: "[AI evaluation unavailable]",
+    };
+  }
+
+  const factorText = evaluation.factors.length > 0 ? ` Factors: ${evaluation.factors.join(" · ")}` : "";
+  const summary = `AI eval ${evaluation.score}/100: ${evaluation.reason}${factorText}`;
+  return {
+    diamondReason: `${evaluation.reason}${factorText}`,
+    rationaleSuffix: `[${summary}]`,
+  };
+}
+
 /**
  * Main suggester: LLM generates quality names → DNS/RDAP verify → Telegram alert.
  */
@@ -194,15 +213,8 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             trendKeywords: [seed.keyword],
           });
 
-          const diamondReason = evaluation
-            ? [
-              evaluation.reason,
-              evaluation.factors.length > 0 ? `Factors: ${evaluation.factors.join(" · ")}` : "",
-            ].filter(Boolean).join(" — ")
-            : null;
-          const storedRationale = evaluation
-            ? `${rationale} [AI eval ${evaluation.score}/100: ${evaluation.reason}${evaluation.factors.length > 0 ? ` | ${evaluation.factors.join(" · ")}` : ""}]`
-            : `[AI evaluation unavailable] ${rationale}`;
+          const formattedEvaluation = formatEvaluation(evaluation);
+          const storedRationale = `${rationale} ${formattedEvaluation.rationaleSuffix}`;
 
           await db.insert(discoveriesTable).values({
             fqdn, name, tld: "com",
@@ -217,7 +229,7 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             dnsEvidence: rdap.evidence,
             isDiamond: evaluation?.isDiamond ?? false,
             diamondScore: evaluation ? String(evaluation.score) : null,
-            diamondReason,
+            diamondReason: formattedEvaluation.diamondReason,
           }).onConflictDoNothing({ target: discoveriesTable.fqdn });
 
           await db.insert(dnsCacheTable).values({

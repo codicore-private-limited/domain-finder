@@ -39,7 +39,11 @@ const LOW_SIGNAL_WORDS = new Set([
 ]);
 
 function hasHighIntentKeyword(name: string): boolean {
-  return HIGH_INTENT_KEYWORDS.some((keyword) => name.includes(keyword));
+  return HIGH_INTENT_KEYWORDS.some((keyword) => (
+    keyword.length < 4
+      ? name.startsWith(keyword) || name.endsWith(keyword)
+      : name.includes(keyword)
+  ));
 }
 
 function ordinaryTwoWordCombo(name: string): string[] | null {
@@ -150,7 +154,11 @@ Return ONLY valid JSON:
 
     const score = Math.max(0, Math.min(100, Math.round(result.score)));
     const verdict = String(result.verdict ?? "").trim().toLowerCase();
-    const normalizedVerdict = verdict === "diamond" ? "investment_grade" : verdict;
+    const normalizedVerdict = verdict === "diamond"
+      ? "investment_grade"
+      : verdict === "investment_grade" || verdict === "decent" || verdict === "skip"
+        ? verdict
+        : "skip";
     const isDiamond = normalizedVerdict === "investment_grade" && score >= DIAMOND_THRESHOLD;
 
     return {
