@@ -237,6 +237,7 @@ class Hunter extends EventEmitter {
   ): { names: string[]; evaluated: number } {
     if (limit <= 0) return { names: [], evaluated: 0 };
     const out: string[] = [];
+    const outSet = new Set<string>();
     let evaluated = 0;
     const strategies: Strategy[] = [
       strategy,
@@ -263,7 +264,10 @@ class Hunter extends EventEmitter {
       );
       evaluated += generated.evaluated;
       for (const name of generated.names) {
-        if (!alreadyQueued.has(name) && !out.includes(name)) out.push(name);
+        if (!alreadyQueued.has(name) && !outSet.has(name)) {
+          outSet.add(name);
+          out.push(name);
+        }
         if (out.length >= limit) break;
       }
     }
@@ -757,17 +761,17 @@ class Hunter extends EventEmitter {
           .onConflictDoNothing()
           .returning({ fqdn: discoveriesTable.fqdn });
         const insertedSet = new Set(inserted.map((r) => r.fqdn));
-        const insertedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
+        const savedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         const newCount = insertedSet.size;
         this.state.totalDiscoveries += newCount;
-        for (const d of insertedDiamonds) {
+        for (const d of savedDiamonds) {
           this.bumpStat("perStrategy", d.strategy, "diamonds");
         }
         this.bumpStat("perCategory", category, "diamonds", newCount);
 
         // Async LLM diamond evaluation for each newly saved domain.
         // Runs in background — never blocks the main hunt loop.
-        for (const d of insertedDiamonds) {
+        for (const d of savedDiamonds) {
           void (async () => {
             try {
               const evaluation = await evaluateDiamond(d.name, "com", {
