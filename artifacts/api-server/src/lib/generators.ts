@@ -889,11 +889,15 @@ export function generateNewsDriven(
   return Array.from(out);
 }
 
-// The hunter runs ONE strategy only: real, meaningful phrases (curated modern
-// high-value concepts + demand-ranked corpus phrases). No random combos, no
-// junk dictionary sweeps — only genuine, sellable "hira" candidates.
+// The hunter rotates through genuine, sellable real-word strategies so it does
+// not stall after the top priority phrase pool has been recently checked.
 export const ALL_STRATEGIES = [
   "real_phrase",
+  "two_word_real",
+  "three_word_real",
+  "news_driven",
+  "one_word_real",
+  "four_letter_real",
 ] as const;
 
 // Per-strategy length envelope. Exported so the hunter applies the SAME bounds
@@ -948,9 +952,13 @@ export function generate(
   switch (strategy) {
     // Real-phrase: the brandable, sellable two-word concepts (demand-ranked).
     case "real_phrase":
-    case "news_driven":
-    case "three_word_real":
       raw = generateRealPhrase(oversample, seed, excludeNames);
+      break;
+    case "news_driven":
+      raw = generateNewsDriven(trendKeywords, oversample, seed);
+      break;
+    case "three_word_real":
+      raw = generateThreeWordReal(oversample, seed);
       break;
     // Two-word brandable combos — the large, fresh, all-.com pool.
     case "two_word_real":

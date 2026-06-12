@@ -109,11 +109,9 @@ export async function dnsAvailabilityBatch(
   concurrency = 64,
 ): Promise<DnsCheckResult[]> {
   const out: DnsCheckResult[] = new Array(fqdns.length);
-  let cursor = 0;
-  async function worker() {
-    while (true) {
-      const idx = cursor++;
-      if (idx >= fqdns.length) return;
+  const workerCount = Math.min(concurrency, fqdns.length);
+  async function worker(workerStart: number) {
+    for (let idx = workerStart; idx < fqdns.length; idx += workerCount) {
       const fqdn = fqdns[idx]!;
       try {
         out[idx] = await dnsAvailability(fqdn);
@@ -128,7 +126,7 @@ export async function dnsAvailabilityBatch(
     }
   }
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, fqdns.length) }, () => worker()),
+    Array.from({ length: workerCount }, (_, workerStart) => worker(workerStart)),
   );
   return out;
 }

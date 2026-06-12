@@ -81,11 +81,9 @@ export async function rdapBatch(
   delayMsBetween = 0,
 ): Promise<RdapResult[]> {
   const out: RdapResult[] = new Array(fqdns.length);
-  let cursor = 0;
-  async function worker() {
-    while (true) {
-      const idx = cursor++;
-      if (idx >= fqdns.length) return;
+  const workerCount = Math.min(concurrency, fqdns.length);
+  async function worker(workerStart: number) {
+    for (let idx = workerStart; idx < fqdns.length; idx += workerCount) {
       const fqdn = fqdns[idx]!;
       try {
         out[idx] = await rdapDotComCheck(fqdn);
@@ -98,7 +96,7 @@ export async function rdapBatch(
     }
   }
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, fqdns.length) }, () => worker()),
+    Array.from({ length: workerCount }, (_, workerStart) => worker(workerStart)),
   );
   return out;
 }

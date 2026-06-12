@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { sql, inArray, eq } from "drizzle-orm";
 import { db, discoveriesTable, dnsCacheTable } from "@workspace/db";
-import { ALL_STRATEGIES } from "./generators";
+import { ALL_STRATEGIES, generateBulk } from "./generators";
 import { scoreCandidate } from "./scoring";
 import { generateTrendsForCategory, buildRationale } from "./groq";
 import { dnsAvailabilityBatch, type DnsCheckResult } from "./availability";
@@ -35,6 +35,11 @@ const STRATEGIES = ALL_STRATEGIES;
 
 type Category = (typeof CATEGORIES)[number];
 type Strategy = (typeof STRATEGIES)[number];
+
+interface ProbeItem {
+  name: string;
+  strategy: Strategy;
+}
 
 export interface HunterEvent {
   id: number;
@@ -95,6 +100,8 @@ const RING_SIZE = 250;
 const DEFAULT_BATCH_SIZE = 2000;
 const DEFAULT_CONCURRENCY = 400;
 const DEFAULT_MIN_SCORE = 0;
+const BACKFILL_MAX_ROUNDS = 5;
+const BACKFILL_SEED_STEP = 0x9e3779b1; // Golden-ratio hash step spreads generated names across cycles.
 
 class Hunter extends EventEmitter {
   private state: HunterState = {
@@ -219,6 +226,52 @@ class Hunter extends EventEmitter {
       out.push(name);
     }
     return out;
+  }
+
+  private buildFreshBackfill(
+    limit: number,
+    category: Category,
+    strategy: Strategy,
+    trendKeywords: string[],
+    alreadyQueued: Set<string>,
+  ): { names: string[]; evaluated: number } {
+    if (limit <= 0) return { names: [], evaluated: 0 };
+    const out: string[] = [];
+    const outSet = new Set<string>();
+    let evaluated = 0;
+    const strategies: Strategy[] = [
+      strategy,
+      ...STRATEGIES.filter((s) => s !== strategy),
+    ];
+    for (const candidateStrategy of strategies) {
+      if (out.length >= limit) break;
+      const exclude = new Set(this.everSearchedBare);
+      for (const name of alreadyQueued) exclude.add(name);
+      for (const name of out) exclude.add(name);
+      // Mix wall-clock time with cycle number intentionally: restarts should not
+      // replay the same backfill sequence, while each cycle still spreads seeds
+      // predictably via the golden-ratio step. XOR combines both inputs; >>> 0
+      // converts the result into the unsigned 32-bit seed expected downstream.
+      const seed = (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0;
+      const generated = generateBulk(
+        candidateStrategy,
+        category,
+        trendKeywords,
+        limit - out.length,
+        seed,
+        exclude,
+        BACKFILL_MAX_ROUNDS,
+      );
+      evaluated += generated.evaluated;
+      for (const name of generated.names) {
+        if (!alreadyQueued.has(name) && !outSet.has(name)) {
+          outSet.add(name);
+          out.push(name);
+        }
+        if (out.length >= limit) break;
+      }
+    }
+    return { names: out, evaluated };
   }
 
   private emitEvent(ev: Omit<HunterEvent, "id" | "ts">) {
@@ -486,13 +539,27 @@ class Hunter extends EventEmitter {
     // numeric "rating" gate — every real phrase that is due gets probed; if its
     // .com is free, it is a diamond. Period.
     const tEvalStart = Date.now();
-    const batch = this.buildPhraseBatch(requested);
+    const priorityBatch = this.buildPhraseBatch(requested);
+    const queued = new Set(priorityBatch);
+    const freshBackfill = this.buildFreshBackfill(
+      requested - priorityBatch.length,
+      category,
+      strategy,
+      trends,
+      queued,
+    );
+    const batch: ProbeItem[] = [
+      ...priorityBatch.map((name) => ({ name, strategy: "real_phrase" as Strategy })),
+      ...freshBackfill.names.map((name) => ({ name, strategy })),
+    ];
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
-    const evaluated = HUNT_POOL.length;
+    const evaluated = HUNT_POOL.length + freshBackfill.evaluated;
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
-    this.bumpStat("perStrategy", strategy, "generated", batch.length);
+    for (const item of batch) {
+      this.bumpStat("perStrategy", item.strategy, "generated");
+    }
     this.bumpStat("perCategory", category, "generated", batch.length);
 
     if (batch.length === 0) {
@@ -501,7 +568,7 @@ class Hunter extends EventEmitter {
       // "1 gem a day/week" cadence the user asked for).
       this.emitEvent({
         kind: "info",
-        message: `All ${HUNT_POOL.length.toLocaleString()} good names recently checked — waiting for the next one to free up`,
+        message: `All ${HUNT_POOL.length.toLocaleString()} priority names recently checked; waiting for new candidates to become available`,
       });
       await new Promise((r) => setTimeout(r, 15000));
       return;
@@ -509,9 +576,9 @@ class Hunter extends EventEmitter {
 
     // Score purely for storage + ordering (real-world demand), NOT as a rating
     // gate. Phrases are already demand-ordered, so we keep that order.
-    const scored = batch.map((name) => ({
-      name,
-      score: scoreCandidate({ name, tld: "com", trendKeywords: trends }),
+    const scored = batch.map((item) => ({
+      ...item,
+      score: scoreCandidate({ name: item.name, tld: "com", trendKeywords: trends }),
     }));
     const passing = scored;
     const evalRate = Math.round((evaluated / evalElapsed) * 1000);
@@ -519,7 +586,7 @@ class Hunter extends EventEmitter {
 
     this.emitEvent({
       kind: "phase",
-      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful phrases (#1: ${passing[0]?.name})`,
+      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful domains (#1: ${passing[0]?.name})`,
       data: {
         cycle: this.state.cycle,
         category,
@@ -552,7 +619,9 @@ class Hunter extends EventEmitter {
     }
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
-    this.bumpStat("perStrategy", strategy, "checked", results.length);
+    for (const item of passing) {
+      this.bumpStat("perStrategy", item.strategy, "checked");
+    }
     this.bumpStat("perCategory", category, "checked", results.length);
 
     // Bulk persist to dns_cache.
@@ -564,14 +633,26 @@ class Hunter extends EventEmitter {
 
     let registered = 0;
     let unknown = 0;
-    const dnsCandidates: { name: string; fqdn: string; result: DnsCheckResult; score: ReturnType<typeof scoreCandidate> }[] = [];
+    const dnsCandidates: {
+      name: string;
+      fqdn: string;
+      strategy: Strategy;
+      result: DnsCheckResult;
+      score: ReturnType<typeof scoreCandidate>;
+    }[] = [];
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
       const p = passing[i]!;
       if (r.signal === "registered") registered++;
       else if (r.signal === "unknown") unknown++;
       else if (r.signal === "available") {
-        dnsCandidates.push({ name: p.name, fqdn: r.fqdn, result: r, score: p.score });
+        dnsCandidates.push({
+          name: p.name,
+          fqdn: r.fqdn,
+          strategy: p.strategy,
+          result: r,
+          score: p.score,
+        });
       }
     }
     this.state.totalRegistered += registered;
@@ -653,7 +734,7 @@ class Hunter extends EventEmitter {
         name: d.name,
         tld: "com",
         category,
-        strategy,
+        strategy: d.strategy,
         pattern: d.score.pattern,
         length: d.name.length,
         valueScore: String(d.score.valueScore),
@@ -663,7 +744,7 @@ class Hunter extends EventEmitter {
           name: d.name,
           tld: "com",
           category,
-          strategy,
+          strategy: d.strategy,
           pattern: d.score.pattern,
           valueScore: d.score.valueScore,
         }),
@@ -680,14 +761,17 @@ class Hunter extends EventEmitter {
           .onConflictDoNothing()
           .returning({ fqdn: discoveriesTable.fqdn });
         const insertedSet = new Set(inserted.map((r) => r.fqdn));
+        const savedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         const newCount = insertedSet.size;
         this.state.totalDiscoveries += newCount;
-        this.bumpStat("perStrategy", strategy, "diamonds", newCount);
+        for (const d of savedDiamonds) {
+          this.bumpStat("perStrategy", d.strategy, "diamonds");
+        }
         this.bumpStat("perCategory", category, "diamonds", newCount);
 
         // Async LLM diamond evaluation for each newly saved domain.
         // Runs in background — never blocks the main hunt loop.
-        for (const d of newDiamonds) {
+        for (const d of savedDiamonds) {
           void (async () => {
             try {
               const evaluation = await evaluateDiamond(d.name, "com", {
@@ -724,19 +808,19 @@ class Hunter extends EventEmitter {
         for (const d of newDiamonds.slice(0, 8)) {
           this.emitEvent({
             kind: "discovery",
-            message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${strategy})`,
-            data: { fqdn: d.fqdn, category, strategy, valueScore: d.score.valueScore },
+            message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${d.strategy})`,
+            data: { fqdn: d.fqdn, category, strategy: d.strategy, valueScore: d.score.valueScore },
           });
           if (d.score.valueScore >= TELEGRAM_ALERT_THRESHOLD) {
             queueTelegramAlert({
               name: d.name,
               fqdn: d.fqdn,
               category,
-              strategy,
+              strategy: d.strategy,
               valueScore: d.score.valueScore,
               pattern: d.score.pattern,
               rationale: buildRationale({
-                name: d.name, tld: "com", category, strategy,
+                name: d.name, tld: "com", category, strategy: d.strategy,
                 pattern: d.score.pattern, valueScore: d.score.valueScore,
               }),
               dnsEvidence: d.result.evidence,
