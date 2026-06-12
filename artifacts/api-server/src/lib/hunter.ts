@@ -247,8 +247,9 @@ class Hunter extends EventEmitter {
       const exclude = new Set(this.everSearchedBare);
       for (const name of alreadyQueued) exclude.add(name);
       for (const name of out) exclude.add(name);
-      // Mix wall-clock time with cycle number so each cycle starts from a varied
-      // but deterministic seed for the generator.
+      // Mix wall-clock time with cycle number intentionally: restarts should not
+      // replay the same backfill sequence, while each cycle still spreads seeds
+      // predictably via the golden-ratio step.
       const seed = (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0;
       const generated = generateBulk(
         candidateStrategy,
@@ -562,7 +563,7 @@ class Hunter extends EventEmitter {
       // "1 gem a day/week" cadence the user asked for).
       this.emitEvent({
         kind: "info",
-        message: `All ${HUNT_POOL.length.toLocaleString()} priority names recently checked and no fresh backfill was generated — waiting before retry`,
+        message: `All ${HUNT_POOL.length.toLocaleString()} priority names recently checked; backfill found no unsearched sellable candidates within round limits — waiting before retry`,
       });
       await new Promise((r) => setTimeout(r, 15000));
       return;
