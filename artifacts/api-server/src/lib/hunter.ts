@@ -1,7 +1,7 @@
 import { EventEmitter } from "events";
 import { sql, inArray, eq } from "drizzle-orm";
 import { db, discoveriesTable, dnsCacheTable } from "@workspace/db";
-import { ALL_STRATEGIES } from "./generators";
+import { ALL_STRATEGIES, generateBulk } from "./generators";
 import { scoreCandidate } from "./scoring";
 import { generateTrendsForCategory, buildRationale } from "./groq";
 import { dnsAvailabilityBatch, type DnsCheckResult } from "./availability";
@@ -35,6 +35,11 @@ const STRATEGIES = ALL_STRATEGIES;
 
 type Category = (typeof CATEGORIES)[number];
 type Strategy = (typeof STRATEGIES)[number];
+
+interface ProbeItem {
+  name: string;
+  strategy: Strategy;
+}
 
 export interface HunterEvent {
   id: number;
@@ -217,6 +222,41 @@ class Hunter extends EventEmitter {
       const last = this.phraseLastCheck.get(name) ?? 0;
       if (now - last < PHRASE_RECHECK_MS) continue;
       out.push(name);
+    }
+    return out;
+  }
+
+  private buildFreshBackfill(
+    limit: number,
+    category: Category,
+    strategy: Strategy,
+    trendKeywords: string[],
+    alreadyQueued: Set<string>,
+  ): string[] {
+    if (limit <= 0) return [];
+    const out: string[] = [];
+    const strategies: Strategy[] = [
+      strategy,
+      ...STRATEGIES.filter((s) => s !== strategy),
+    ];
+    for (const candidateStrategy of strategies) {
+      if (out.length >= limit) break;
+      const exclude = new Set(this.everSearchedBare);
+      for (const name of alreadyQueued) exclude.add(name);
+      for (const name of out) exclude.add(name);
+      const generated = generateBulk(
+        candidateStrategy,
+        category,
+        trendKeywords,
+        limit - out.length,
+        (Date.now() ^ (this.state.cycle * 0x9e3779b1)) >>> 0,
+        exclude,
+        5,
+      ).names;
+      for (const name of generated) {
+        if (!alreadyQueued.has(name) && !out.includes(name)) out.push(name);
+        if (out.length >= limit) break;
+      }
     }
     return out;
   }
@@ -486,9 +526,21 @@ class Hunter extends EventEmitter {
     // numeric "rating" gate — every real phrase that is due gets probed; if its
     // .com is free, it is a diamond. Period.
     const tEvalStart = Date.now();
-    const batch = this.buildPhraseBatch(requested);
+    const priorityBatch = this.buildPhraseBatch(requested);
+    const queued = new Set(priorityBatch);
+    const freshBackfill = this.buildFreshBackfill(
+      requested - priorityBatch.length,
+      category,
+      strategy,
+      trends,
+      queued,
+    );
+    const batch: ProbeItem[] = [
+      ...priorityBatch.map((name) => ({ name, strategy: "real_phrase" as Strategy })),
+      ...freshBackfill.map((name) => ({ name, strategy })),
+    ];
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
-    const evaluated = HUNT_POOL.length;
+    const evaluated = HUNT_POOL.length + (freshBackfill.length > 0 ? requested * 5 : 0);
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
@@ -501,7 +553,7 @@ class Hunter extends EventEmitter {
       // "1 gem a day/week" cadence the user asked for).
       this.emitEvent({
         kind: "info",
-        message: `All ${HUNT_POOL.length.toLocaleString()} good names recently checked — waiting for the next one to free up`,
+        message: `All ${HUNT_POOL.length.toLocaleString()} priority names recently checked and no fresh backfill was generated — waiting before retry`,
       });
       await new Promise((r) => setTimeout(r, 15000));
       return;
@@ -509,9 +561,9 @@ class Hunter extends EventEmitter {
 
     // Score purely for storage + ordering (real-world demand), NOT as a rating
     // gate. Phrases are already demand-ordered, so we keep that order.
-    const scored = batch.map((name) => ({
-      name,
-      score: scoreCandidate({ name, tld: "com", trendKeywords: trends }),
+    const scored = batch.map((item) => ({
+      ...item,
+      score: scoreCandidate({ name: item.name, tld: "com", trendKeywords: trends }),
     }));
     const passing = scored;
     const evalRate = Math.round((evaluated / evalElapsed) * 1000);
@@ -519,7 +571,7 @@ class Hunter extends EventEmitter {
 
     this.emitEvent({
       kind: "phase",
-      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful phrases (#1: ${passing[0]?.name})`,
+      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful domains (#1: ${passing[0]?.name})`,
       data: {
         cycle: this.state.cycle,
         category,
@@ -653,7 +705,7 @@ class Hunter extends EventEmitter {
         name: d.name,
         tld: "com",
         category,
-        strategy,
+        strategy: d.strategy,
         pattern: d.score.pattern,
         length: d.name.length,
         valueScore: String(d.score.valueScore),
@@ -725,19 +777,19 @@ class Hunter extends EventEmitter {
         for (const d of newDiamonds.slice(0, 8)) {
           this.emitEvent({
             kind: "discovery",
-            message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${strategy})`,
-            data: { fqdn: d.fqdn, category, strategy, valueScore: d.score.valueScore },
+            message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${d.strategy})`,
+            data: { fqdn: d.fqdn, category, strategy: d.strategy, valueScore: d.score.valueScore },
           });
           if (d.score.valueScore >= TELEGRAM_ALERT_THRESHOLD) {
             queueTelegramAlert({
               name: d.name,
               fqdn: d.fqdn,
               category,
-              strategy,
+              strategy: d.strategy,
               valueScore: d.score.valueScore,
               pattern: d.score.pattern,
               rationale: buildRationale({
-                name: d.name, tld: "com", category, strategy,
+                name: d.name, tld: "com", category, strategy: d.strategy,
                 pattern: d.score.pattern, valueScore: d.score.valueScore,
               }),
               dnsEvidence: d.result.evidence,
