@@ -41,7 +41,23 @@ services:
         fromDatabase:
           name: domain-finder-db
           property: connectionString
+      # Diamond cutoff: only verdict=diamond AND score>=threshold alerts.
+      - key: DIAMOND_THRESHOLD
+        value: "88"
+      # Optional split LLM models. Set in the Render dashboard per your active
+      # provider (GitHub Models / Groq). LLM_EVALUATOR_MODEL must be a valid
+      # model id for that provider, else evaluation falls back to the default.
+      - key: LLM_GENERATOR_MODEL
+        sync: false
+      - key: LLM_EVALUATOR_MODEL
+        sync: false
       # Set these in the Render dashboard (do NOT commit secrets):
+      # GITHUB_MODELS_TOKEN is the PRIMARY LLM provider (GitHub Models). The AI
+      # diamond gate + Telegram alerts need at least ONE of GITHUB_MODELS_TOKEN
+      # or GROQ_API_KEY set; otherwise every name falls back to the conservative
+      # local gate and almost nothing will alert.
+      - key: GITHUB_MODELS_TOKEN
+        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: GODADDY_API_KEY

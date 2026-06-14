@@ -26,6 +26,35 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   ],
 };
 
+/**
+ * Curated high-value commercial concept phrases. When one of these appears in a
+ * headline it is a strong, commercially-meaningful domain seed — far better than
+ * a single frequent token. Used to (a) prioritise phrase keyword extraction and
+ * (b) boost category relevance in the impact score. This is a TREND/RADAR signal
+ * only; the final diamond decision still happens in the strict domain evaluator.
+ */
+const HIGH_VALUE_PHRASES: string[] = [
+  // AI / software / infra
+  "ai agent", "ai agents", "agentic ai", "autonomous agent", "ai infrastructure",
+  "ai model", "ai models", "foundation model", "language model", "image model",
+  "video model", "world model", "reasoning model", "inference engine", "voice ai",
+  "vision model", "multimodal model", "ai chip", "ai chips", "ai accelerator",
+  "edge ai", "ai search", "code generation", "developer tools", "developer workflow",
+  "workflow automation", "data pipeline", "data infrastructure", "cloud security",
+  "data security", "identity verification", "fraud detection", "robot vision",
+  "humanoid robot", "machine vision",
+  // biotech / health
+  "gene therapy", "cell therapy", "drug discovery", "synthetic biology",
+  "protein design", "cancer vaccine", "brain implant", "weight loss",
+  // green energy
+  "fusion energy", "fusion battery", "nuclear fusion", "solid state",
+  "solid state battery", "carbon capture", "clean energy", "grid storage",
+  // quantum / space
+  "quantum chip", "quantum computing", "quantum processor", "error correction",
+  "space station", "satellite internet", "lunar lander", "reusable rocket",
+];
+const HIGH_VALUE_PHRASE_SET = new Set(HIGH_VALUE_PHRASES);
+
 const STOPWORDS = new Set([
   "the", "and", "for", "with", "from", "this", "that", "have", "has",
   "will", "would", "could", "should", "their", "they", "them", "what",
@@ -42,6 +71,16 @@ const STOPWORDS = new Set([
   "nbsp", "amp", "quot", "apos", "href", "https", "http", "www", "com",
   "active", "generic", "ingredient", "ingredients", "exclusive", "reuters",
   "read", "more", "full", "story", "click", "via", "ago", "report",
+  // News / funding boilerplate. These are NOT useful domain seeds — they are
+  // the journalistic scaffolding around the actual trend. (News keyword
+  // extraction only; domain wordlists are untouched.)
+  "raise", "raises", "raised", "raising", "funding", "funded", "million",
+  "billion", "series", "round", "seed", "capital", "venture", "ventures",
+  "investor", "investors", "startup", "startups", "company", "companies",
+  "firm", "firms", "launch", "launches", "launched", "announce", "announces",
+  "announced", "reports", "reported", "according", "source", "sources",
+  "show", "shows", "reveal", "reveals", "revealed", "plan", "plans",
+  "technology", "platform", "solution", "solutions",
 ]);
 
 function classifyCategories(title: string, summary: string | null): string[] {
@@ -53,18 +92,87 @@ function classifyCategories(title: string, summary: string | null): string[] {
   return out;
 }
 
+function isContentToken(t: string, minLen: number): boolean {
+  return (
+    t.length >= minLen &&
+    t.length <= 18 &&
+    !STOPWORDS.has(t) &&
+    !/^\d+$/.test(t)
+  );
+}
+
+/**
+ * Extract commercially-meaningful keywords from a headline.
+ *
+ * Returns a mix of:
+ *  1. recognised high-value concept phrases (e.g. "ai agent", "gene therapy"),
+ *  2. distinctive 2-word concept phrases where BOTH halves are content words,
+ *  3. single content words (kept for the UI / as a fallback).
+ *
+ * Phrases rank ahead of single tokens so we surface "cloud security" or
+ * "workflow automation" instead of leaking generic boilerplate like "raises".
+ */
 function extractKeywords(title: string, summary: string | null): string[] {
   const text = `${title} ${summary ?? ""}`.toLowerCase();
   const tokens = text
     .replace(/[^a-z0-9\s-]/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length >= 4 && t.length <= 12 && !STOPWORDS.has(t) && !/^\d+$/.test(t));
-  const freq = new Map<string, number>();
-  for (const t of tokens) freq.set(t, (freq.get(t) ?? 0) + 1);
-  return Array.from(freq.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 12)
+    .filter((t) => t.length > 0);
+
+  // 1) Known high-value phrases present verbatim in the text (top priority).
+  const phraseHits: string[] = [];
+  for (const phrase of HIGH_VALUE_PHRASES) {
+    if (text.includes(phrase)) phraseHits.push(phrase);
+  }
+
+  // 2) Generic 2-word concept phrases: both tokens must be content words.
+  //    A short token (e.g. "ai") is allowed as a bigram half so we don't lose
+  //    "ai agent" / "voice ai", but stopwords/digits are excluded both sides.
+  const bigramFreq = new Map<string, number>();
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const a = tokens[i]!;
+    const b = tokens[i + 1]!;
+    if (a === b) continue;
+    if (!isContentToken(a, 2) || !isContentToken(b, 2)) continue;
+    // Require at least one half to carry real length so we skip "ev ai"-type noise.
+    if (a.length < 3 && b.length < 3) continue;
+    const bigram = `${a} ${b}`;
+    bigramFreq.set(bigram, (bigramFreq.get(bigram) ?? 0) + 1);
+  }
+
+  // 3) Single content words (>=4 chars to keep the UI clean).
+  const wordFreq = new Map<string, number>();
+  for (const t of tokens) {
+    if (!isContentToken(t, 4)) continue;
+    wordFreq.set(t, (wordFreq.get(t) ?? 0) + 1);
+  }
+
+  const rankedBigrams = Array.from(bigramFreq.entries())
+    .sort((a, b) => {
+      // Curated high-value phrases first, then by frequency.
+      const av = HIGH_VALUE_PHRASE_SET.has(a[0]) ? 1 : 0;
+      const bv = HIGH_VALUE_PHRASE_SET.has(b[0]) ? 1 : 0;
+      if (av !== bv) return bv - av;
+      return b[1] - a[1];
+    })
     .map(([k]) => k);
+
+  const rankedWords = Array.from(wordFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([k]) => k);
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (k: string) => {
+    if (k && !seen.has(k)) {
+      seen.add(k);
+      out.push(k);
+    }
+  };
+  for (const p of phraseHits) add(p);
+  for (const b of rankedBigrams) add(b);
+  for (const w of rankedWords) add(w);
+  return out.slice(0, 12);
 }
 
 /**
@@ -118,6 +226,83 @@ function recencyBoost(publishedAt: Date): number {
   return 0.15;
 }
 
+const FUNDING_MULTIPLIERS: Record<string, number> = {
+  k: 1_000,
+  thousand: 1_000,
+  m: 1_000_000,
+  mn: 1_000_000,
+  million: 1_000_000,
+  b: 1_000_000_000,
+  bn: 1_000_000_000,
+  billion: 1_000_000_000,
+};
+
+/** Largest money amount (USD-ish) mentioned in the text, or 0. */
+function detectFundingUsd(text: string): number {
+  const re = /[$€£]?\s*(\d+(?:\.\d+)?)\s*(k|thousand|m|mn|million|b|bn|billion)\b/gi;
+  let max = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const value = parseFloat(m[1] ?? "0");
+    const mult = FUNDING_MULTIPLIERS[(m[2] ?? "").toLowerCase()] ?? 1;
+    const amount = value * mult;
+    if (amount > max) max = amount;
+  }
+  return max;
+}
+
+/**
+ * Funding signal 0..1. Only fires when there is an actual money symbol ($X M/B)
+ * or explicit funding context, so "5 million users" does not count as funding.
+ */
+function fundingSignal(text: string): number {
+  const hasMoney = /[$€£]\s*\d/.test(text);
+  const hasContext =
+    /\b(raise|raises|raised|raising|funding|funded|round|investment|valuation|series\s+[a-e]\b|seed round|backed by)\b/.test(
+      text,
+    );
+  if (!hasMoney && !hasContext) return 0;
+  const amount = detectFundingUsd(text);
+  if (amount >= 1_000_000_000) return 1;
+  if (amount >= 500_000_000) return 0.9;
+  if (amount >= 100_000_000) return 0.8;
+  if (amount >= 50_000_000) return 0.65;
+  if (amount >= 10_000_000) return 0.5;
+  if (amount >= 1_000_000) return 0.35;
+  return hasContext ? 0.2 : 0;
+}
+
+/**
+ * Category relevance 0..1. Rewards events that clearly sit in a deep-tech bucket
+ * and — especially — those that contain a recognised high-value concept phrase.
+ */
+function categoryRelevanceSignal(text: string, categories: string[]): number {
+  let score = Math.min(0.6, categories.length * 0.3);
+  if (HIGH_VALUE_PHRASES.some((p) => text.includes(p))) {
+    score = Math.max(0.7, Math.min(1, score + 0.4));
+  }
+  return score;
+}
+
+const BREAKTHROUGH_WORDS = [
+  "breakthrough", "world first", "first ever", "approval", "approved",
+  "clearance", "cleared", "clinical trial", "phase 3", "phase iii",
+  "fda approval", "patent", "milestone", "record", "novel", "unveil",
+  "demonstrate", "discovery", "passes",
+];
+
+/**
+ * Breakthrough / regulatory / research signal 0..1. FDA (regulatory) and ArXiv
+ * (primary research) get strong fixed values so they never depend on engagement.
+ */
+function breakthroughSignal(source: string, text: string): number {
+  if (source === "fda") return 1;
+  if (source === "arxiv") return 0.8;
+  let hits = 0;
+  for (const w of BREAKTHROUGH_WORDS) if (text.includes(w)) hits++;
+  return Math.min(1, hits * 0.4);
+}
+
 export interface NormalizedEvent {
   dedupeKey: string;
   source: string;
@@ -146,12 +331,37 @@ export function normalizeEvent(item: RawNewsItem): NormalizedEvent | null {
   const keywords = extractKeywords(item.title, item.summary);
   if (keywords.length === 0) return null;
 
+  const text = `${item.title} ${item.summary ?? ""}`.toLowerCase();
   const trust = trustOf(item.source);
   const engagement = engagementBoost(item.source, item.metadata);
   const recency = recencyBoost(item.publishedAt);
-  // Weighted impact score 0..100.
-  const raw = trust * 0.3 + engagement * 0.4 + recency * 0.3;
-  const impactScore = Math.round(raw * 100 * 10) / 10;
+  const categoryRel = categoryRelevanceSignal(text, categories);
+  const funding = fundingSignal(text);
+  const breakthrough = breakthroughSignal(item.source, text);
+
+  // Source-aware factor model. Each factor is 0..1; weights sum to 100. Recency
+  // is deliberately a minority weight so a fresh-but-empty post can't dominate.
+  let impact =
+    trust * 25 +
+    engagement * 25 +
+    recency * 15 +
+    categoryRel * 15 +
+    funding * 10 +
+    breakthrough * 10;
+
+  // Guard: a freshly-submitted HN "latest" post with zero points AND zero
+  // comments must not ride high on recency alone. Allow an escape hatch only if
+  // it carries a strong category or funding signal in the headline itself.
+  if (item.source === "hackernews" && item.metadata.feed === "latest") {
+    const points = Number(item.metadata.points ?? 0);
+    const comments = Number(item.metadata.comments ?? 0);
+    const strongSignal = funding >= 0.5 || categoryRel >= 0.7;
+    if (points === 0 && comments === 0 && !strongSignal) {
+      impact = Math.min(impact, 45);
+    }
+  }
+
+  const impactScore = Math.round(Math.max(0, Math.min(100, impact)) * 10) / 10;
 
   return {
     dedupeKey: dedupeKeyFor(item),

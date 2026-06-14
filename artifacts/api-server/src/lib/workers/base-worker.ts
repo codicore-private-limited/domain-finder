@@ -158,7 +158,10 @@ export abstract class BaseWorker extends EventEmitter {
         .update(workersTable)
         .set({ lastError: msg, updatedAt: new Date() })
         .where(eq(workersTable.id, this.def.id));
-      this.emit("error", err);
+      // NOTE: must NOT be the reserved "error" event — an EventEmitter with no
+      // "error" listener throws when one is emitted, which would turn a routine
+      // worker run failure into an uncaught exception. Use a plain event name.
+      this.emit("runError", err);
     } finally {
       this.currentRunId = null;
     }

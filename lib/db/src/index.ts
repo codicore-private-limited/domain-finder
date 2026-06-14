@@ -28,6 +28,17 @@ export const pool = new Pool({
     ? { ssl: { rejectUnauthorized: false } }
     : {}),
 });
+
+// A pooled Postgres client can be dropped by the server at any time (idle
+// timeout, failover, maintenance, network blip). node-postgres surfaces that as
+// an 'error' event on the pool. With NO listener attached, Node treats it as an
+// uncaught exception and would crash the process. Log it instead — the pool
+// transparently opens a fresh connection on the next query, so this is
+// non-fatal and is exactly what keeps the service alive 24/7.
+pool.on("error", (err) => {
+  console.error("[db] idle postgres client error (pool will recover):", err);
+});
+
 export const db = drizzle(pool, { schema });
 
 export * from "./schema";

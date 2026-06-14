@@ -1,8 +1,9 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { desc, sql, and, gte, eq } from "drizzle-orm";
+import { desc, sql, and, gte, eq, type SQL } from "drizzle-orm";
 import { db, discoveriesTable, type DiscoveryRow } from "@workspace/db";
 import { hunter } from "../lib/hunter";
 import { testTelegramConnection } from "../lib/telegram";
+import { DIAMOND_THRESHOLD, evaluateLocalDiamond } from "../lib/news/llm-diamond-filter";
 
 const router: IRouter = Router();
 
@@ -21,6 +22,16 @@ async function cachedCount(
 }
 
 function rowToDiscovery(r: DiscoveryRow) {
+  const valueScore = Number(r.valueScore);
+  const diamondScore = r.diamondScore != null ? Number(r.diamondScore) : null;
+  const localEvaluation = evaluateLocalDiamond(r.name, r.tld, { category: r.category });
+  const effectiveDiamond = Boolean(
+    localEvaluation.isDiamond && (
+      r.isDiamond ||
+      (diamondScore != null && diamondScore >= DIAMOND_THRESHOLD) ||
+      (diamondScore == null && valueScore >= DIAMOND_THRESHOLD)
+    ),
+  );
   return {
     id: r.id,
     fqdn: r.fqdn,
@@ -30,14 +41,16 @@ function rowToDiscovery(r: DiscoveryRow) {
     strategy: r.strategy,
     pattern: r.pattern,
     length: r.length,
-    valueScore: Number(r.valueScore),
+    valueScore,
     memorability: r.memorability,
     radioTest: r.radioTest === 1,
     rationale: r.rationale,
     dnsEvidence: r.dnsEvidence,
-    isDiamond: r.isDiamond ?? false,
-    diamondScore: r.diamondScore != null ? Number(r.diamondScore) : null,
-    diamondReason: r.diamondReason ?? null,
+    isDiamond: effectiveDiamond,
+    diamondScore: effectiveDiamond ? (diamondScore ?? localEvaluation.score) : diamondScore,
+    diamondReason: effectiveDiamond
+      ? (r.diamondReason ?? localEvaluation.reason)
+      : (r.diamondReason ?? null),
     viewedAt: r.viewedAt instanceof Date
       ? r.viewedAt.toISOString()
       : r.viewedAt
@@ -169,14 +182,20 @@ router.get("/discoveries", async (req, res): Promise<void> => {
   const sinceDate =
     typeof req.query.since === "string" ? new Date(req.query.since) : null;
 
-  const conds: ReturnType<typeof gte>[] = [gte(discoveriesTable.valueScore, String(minScore))];
+  const conds: SQL[] = [gte(discoveriesTable.valueScore, String(minScore))];
   if (category) conds.push(eq(discoveriesTable.category, category));
   if (strategy) conds.push(eq(discoveriesTable.strategy, strategy));
   if (lengthFilter && lengthFilter >= 3 && lengthFilter <= 15) {
     conds.push(eq(discoveriesTable.length, lengthFilter));
   }
   if (unseenOnly) conds.push(sql`${discoveriesTable.viewedAt} IS NULL`);
-  if (diamondOnly) conds.push(sql`${discoveriesTable.isDiamond} = true`);
+  if (diamondOnly) {
+    conds.push(sql`(
+      ${discoveriesTable.isDiamond} = true
+      OR ${discoveriesTable.diamondScore} >= ${String(DIAMOND_THRESHOLD)}
+      OR (${discoveriesTable.diamondScore} IS NULL AND ${discoveriesTable.valueScore} >= ${String(DIAMOND_THRESHOLD)})
+    )`);
+  }
   if (sinceDate && !Number.isNaN(sinceDate.getTime())) {
     conds.push(sql`${discoveriesTable.discoveredAt} >= ${sinceDate.toISOString()}`);
   }
@@ -197,6 +216,7 @@ router.get("/discoveries", async (req, res): Promise<void> => {
       .limit(4000);
     const sorted = pool
       .map(rowToDiscovery)
+      .filter((d) => !diamondOnly || d.isDiamond)
       .sort((a, b) => b.valueScore - a.valueScore)
       .filter((d) => d.valueScore >= (Number.isFinite(minValue) ? minValue : 0));
     res.json({ total: sorted.length, offset, limit, items: sorted.slice(offset, offset + limit) });
@@ -220,7 +240,8 @@ router.get("/discoveries", async (req, res): Promise<void> => {
     }),
   ]);
 
-  res.json({ total, offset, limit, items: rows.map(rowToDiscovery) });
+  const items = rows.map(rowToDiscovery).filter((d) => !diamondOnly || d.isDiamond);
+  res.json({ total: diamondOnly ? items.length : total, offset, limit, items });
 });
 
 /** Mark a discovery as "seen" so it gets filtered from the unseen view. */

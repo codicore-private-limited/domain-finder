@@ -1,27 +1,41 @@
 import { EventEmitter } from "events";
 import { sql, inArray, eq } from "drizzle-orm";
 import { db, discoveriesTable, dnsCacheTable } from "@workspace/db";
-import { ALL_STRATEGIES, generateBulk } from "./generators";
+import { ALL_STRATEGIES } from "./generators";
 import { scoreCandidate } from "./scoring";
 import { generateTrendsForCategory, buildRationale } from "./groq";
 import { dnsAvailabilityBatch, type DnsCheckResult } from "./availability";
 import { rdapBatch } from "./rdap";
 import { logger } from "./logger";
-import { queueTelegramAlert, sendStartupAlert } from "./telegram";
+import { sendStartupAlert } from "./telegram";
 import { getTrendKeywordsForCategory } from "./news/ingest";
 import { getSeedKeywordsForCategory } from "./news/extractor";
-import { evaluateDiamond, alertDiamond } from "./news/llm-diamond-filter";
+import { evaluateDiamond, evaluateLocalDiamond, alertDiamond } from "./news/llm-diamond-filter";
 import { filterLegallyAllowed } from "./legal/gate";
 import { isSellableDomain, HUNT_POOL } from "./wordlists";
 
-const TELEGRAM_ALERT_THRESHOLD = 96;
+function readIntEnv(name: string, fallback: number, min: number, max: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+const MAX_BATCH_SIZE = 10000;
+const MAX_CONCURRENCY = 1200;
 
 // Re-check every name's .com on this interval so we catch the rare ones that
 // EXPIRE and become available again. Expiry is the only realistic way a good
 // name frees up — so we keep sweeping the whole hunt pool (good one-word
 // dictionary words + meaningful phrases) and re-probe each name once its last
 // check ages past this window.
-const PHRASE_RECHECK_MS = 1 * 60 * 60 * 1000; // 1 hour (was 6h — recheck faster so new pool entries get probed continuously)
+const PHRASE_RECHECK_MS = readIntEnv(
+  "HUNTER_RECHECK_MS",
+  10 * 60 * 1000,
+  60 * 1000,
+  6 * 60 * 60 * 1000,
+);
 
 const CATEGORIES = [
   "ai",
@@ -35,11 +49,6 @@ const STRATEGIES = ALL_STRATEGIES;
 
 type Category = (typeof CATEGORIES)[number];
 type Strategy = (typeof STRATEGIES)[number];
-
-interface ProbeItem {
-  name: string;
-  strategy: Strategy;
-}
 
 export interface HunterEvent {
   id: number;
@@ -97,11 +106,9 @@ export interface HunterState {
 }
 
 const RING_SIZE = 250;
-const DEFAULT_BATCH_SIZE = 2000;
-const DEFAULT_CONCURRENCY = 400;
+const DEFAULT_BATCH_SIZE = readIntEnv("HUNTER_BATCH_SIZE", 5000, 50, MAX_BATCH_SIZE);
+const DEFAULT_CONCURRENCY = readIntEnv("HUNTER_CONCURRENCY", 800, 10, MAX_CONCURRENCY);
 const DEFAULT_MIN_SCORE = 0;
-const BACKFILL_MAX_ROUNDS = 5;
-const BACKFILL_SEED_STEP = 0x9e3779b1; // Golden-ratio hash step spreads generated names across cycles.
 
 class Hunter extends EventEmitter {
   private state: HunterState = {
@@ -228,52 +235,6 @@ class Hunter extends EventEmitter {
     return out;
   }
 
-  private buildFreshBackfill(
-    limit: number,
-    category: Category,
-    strategy: Strategy,
-    trendKeywords: string[],
-    alreadyQueued: Set<string>,
-  ): { names: string[]; evaluated: number } {
-    if (limit <= 0) return { names: [], evaluated: 0 };
-    const out: string[] = [];
-    const outSet = new Set<string>();
-    let evaluated = 0;
-    const strategies: Strategy[] = [
-      strategy,
-      ...STRATEGIES.filter((s) => s !== strategy),
-    ];
-    for (const candidateStrategy of strategies) {
-      if (out.length >= limit) break;
-      const exclude = new Set(this.everSearchedBare);
-      for (const name of alreadyQueued) exclude.add(name);
-      for (const name of out) exclude.add(name);
-      // Mix wall-clock time with cycle number intentionally: restarts should not
-      // replay the same backfill sequence, while each cycle still spreads seeds
-      // predictably via the golden-ratio step. XOR combines both inputs; >>> 0
-      // converts the result into the unsigned 32-bit seed expected downstream.
-      const seed = (Date.now() ^ (this.state.cycle * BACKFILL_SEED_STEP)) >>> 0;
-      const generated = generateBulk(
-        candidateStrategy,
-        category,
-        trendKeywords,
-        limit - out.length,
-        seed,
-        exclude,
-        BACKFILL_MAX_ROUNDS,
-      );
-      evaluated += generated.evaluated;
-      for (const name of generated.names) {
-        if (!alreadyQueued.has(name) && !outSet.has(name)) {
-          outSet.add(name);
-          out.push(name);
-        }
-        if (out.length >= limit) break;
-      }
-    }
-    return { names: out, evaluated };
-  }
-
   private emitEvent(ev: Omit<HunterEvent, "id" | "ts">) {
     const full: HunterEvent = {
       id: this.nextEventId++,
@@ -331,10 +292,10 @@ class Hunter extends EventEmitter {
 
   setSpeed(opts: { batchSize?: number; concurrency?: number }) {
     if (typeof opts.batchSize === "number") {
-      this.state.batchSize = Math.max(50, Math.min(2000, opts.batchSize));
+      this.state.batchSize = Math.max(50, Math.min(MAX_BATCH_SIZE, opts.batchSize));
     }
     if (typeof opts.concurrency === "number") {
-      this.state.concurrency = Math.max(10, Math.min(400, opts.concurrency));
+      this.state.concurrency = Math.max(10, Math.min(MAX_CONCURRENCY, opts.concurrency));
     }
   }
 
@@ -539,27 +500,13 @@ class Hunter extends EventEmitter {
     // numeric "rating" gate — every real phrase that is due gets probed; if its
     // .com is free, it is a diamond. Period.
     const tEvalStart = Date.now();
-    const priorityBatch = this.buildPhraseBatch(requested);
-    const queued = new Set(priorityBatch);
-    const freshBackfill = this.buildFreshBackfill(
-      requested - priorityBatch.length,
-      category,
-      strategy,
-      trends,
-      queued,
-    );
-    const batch: ProbeItem[] = [
-      ...priorityBatch.map((name) => ({ name, strategy: "real_phrase" as Strategy })),
-      ...freshBackfill.names.map((name) => ({ name, strategy })),
-    ];
+    const batch = this.buildPhraseBatch(requested);
     const evalElapsed = Math.max(1, Date.now() - tEvalStart);
-    const evaluated = HUNT_POOL.length + freshBackfill.evaluated;
+    const evaluated = HUNT_POOL.length;
     this.recordEvaluated(evaluated);
     this.state.totalEvaluated += evaluated;
     this.state.totalGenerated += batch.length;
-    for (const item of batch) {
-      this.bumpStat("perStrategy", item.strategy, "generated");
-    }
+    this.bumpStat("perStrategy", strategy, "generated", batch.length);
     this.bumpStat("perCategory", category, "generated", batch.length);
 
     if (batch.length === 0) {
@@ -568,7 +515,7 @@ class Hunter extends EventEmitter {
       // "1 gem a day/week" cadence the user asked for).
       this.emitEvent({
         kind: "info",
-        message: `All ${HUNT_POOL.length.toLocaleString()} priority names recently checked; waiting for new candidates to become available`,
+        message: `All ${HUNT_POOL.length.toLocaleString()} good names recently checked — waiting for the next one to free up`,
       });
       await new Promise((r) => setTimeout(r, 15000));
       return;
@@ -576,9 +523,9 @@ class Hunter extends EventEmitter {
 
     // Score purely for storage + ordering (real-world demand), NOT as a rating
     // gate. Phrases are already demand-ordered, so we keep that order.
-    const scored = batch.map((item) => ({
-      ...item,
-      score: scoreCandidate({ name: item.name, tld: "com", trendKeywords: trends }),
+    const scored = batch.map((name) => ({
+      name,
+      score: scoreCandidate({ name, tld: "com", trendKeywords: trends }),
     }));
     const passing = scored;
     const evalRate = Math.round((evaluated / evalElapsed) * 1000);
@@ -586,7 +533,7 @@ class Hunter extends EventEmitter {
 
     this.emitEvent({
       kind: "phase",
-      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful domains (#1: ${passing[0]?.name})`,
+      message: `Cycle #${this.state.cycle}: probing ${passing.length} meaningful phrases (#1: ${passing[0]?.name})`,
       data: {
         cycle: this.state.cycle,
         category,
@@ -619,9 +566,7 @@ class Hunter extends EventEmitter {
     }
     this.state.everSearchedSize = this.everSearched.size;
     this.state.totalChecked += results.length;
-    for (const item of passing) {
-      this.bumpStat("perStrategy", item.strategy, "checked");
-    }
+    this.bumpStat("perStrategy", strategy, "checked", results.length);
     this.bumpStat("perCategory", category, "checked", results.length);
 
     // Bulk persist to dns_cache.
@@ -633,26 +578,14 @@ class Hunter extends EventEmitter {
 
     let registered = 0;
     let unknown = 0;
-    const dnsCandidates: {
-      name: string;
-      fqdn: string;
-      strategy: Strategy;
-      result: DnsCheckResult;
-      score: ReturnType<typeof scoreCandidate>;
-    }[] = [];
+    const dnsCandidates: { name: string; fqdn: string; result: DnsCheckResult; score: ReturnType<typeof scoreCandidate> }[] = [];
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
       const p = passing[i]!;
       if (r.signal === "registered") registered++;
       else if (r.signal === "unknown") unknown++;
       else if (r.signal === "available") {
-        dnsCandidates.push({
-          name: p.name,
-          fqdn: r.fqdn,
-          strategy: p.strategy,
-          result: r,
-          score: p.score,
-        });
+        dnsCandidates.push({ name: p.name, fqdn: r.fqdn, result: r, score: p.score });
       }
     }
     this.state.totalRegistered += registered;
@@ -729,12 +662,17 @@ class Hunter extends EventEmitter {
     }
 
     if (diamonds.length > 0) {
-      const rows = diamonds.map((d) => ({
+      const localEvaluations = new Map(
+        diamonds.map((d) => [d.fqdn, evaluateLocalDiamond(d.name, "com", { category, trendKeywords: trends })]),
+      );
+      const rows = diamonds.map((d) => {
+        const localEvaluation = localEvaluations.get(d.fqdn)!;
+        return ({
         fqdn: d.fqdn,
         name: d.name,
         tld: "com",
         category,
-        strategy: d.strategy,
+        strategy,
         pattern: d.score.pattern,
         length: d.name.length,
         valueScore: String(d.score.valueScore),
@@ -744,16 +682,17 @@ class Hunter extends EventEmitter {
           name: d.name,
           tld: "com",
           category,
-          strategy: d.strategy,
+          strategy,
           pattern: d.score.pattern,
           valueScore: d.score.valueScore,
         }),
         dnsEvidence: d.result.evidence,
-        // LLM evaluation placeholders — filled asynchronously below.
-        isDiamond: false,
-        diamondScore: null as string | null,
-        diamondReason: null as string | null,
-      }));
+        // Fast local gate first; LLM can refine this asynchronously below.
+        isDiamond: localEvaluation.isDiamond,
+        diamondScore: String(localEvaluation.score),
+        diamondReason: localEvaluation.reason,
+      });
+      });
       try {
         const inserted = await db
           .insert(discoveriesTable)
@@ -761,17 +700,26 @@ class Hunter extends EventEmitter {
           .onConflictDoNothing()
           .returning({ fqdn: discoveriesTable.fqdn });
         const insertedSet = new Set(inserted.map((r) => r.fqdn));
-        const savedDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
         const newCount = insertedSet.size;
         this.state.totalDiscoveries += newCount;
-        for (const d of savedDiamonds) {
-          this.bumpStat("perStrategy", d.strategy, "diamonds");
-        }
+        this.bumpStat("perStrategy", strategy, "diamonds", newCount);
         this.bumpStat("perCategory", category, "diamonds", newCount);
+        const newDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
 
-        // Async LLM diamond evaluation for each newly saved domain.
-        // Runs in background — never blocks the main hunt loop.
-        for (const d of savedDiamonds) {
+        // Async LLM diamond evaluation for each newly saved domain. Local gate
+        // already populated the row, so the UI never goes blank while this runs.
+        // Spend a scarce LLM call ONLY on names the cheap local gate already
+        // rates diamond-grade or strong — the bulk of pool finds are weak combos
+        // that can never be diamonds, so evaluating them would just burn the
+        // free LLM token quota and starve the names that actually matter.
+        for (const d of newDiamonds) {
+          const local = localEvaluations.get(d.fqdn);
+          if (
+            !local ||
+            (local.verdict !== "diamond" && local.verdict !== "strong_watchlist")
+          ) {
+            continue;
+          }
           void (async () => {
             try {
               const evaluation = await evaluateDiamond(d.name, "com", {
@@ -803,34 +751,20 @@ class Hunter extends EventEmitter {
           })();
         }
 
-        // 🔔 Old score-based Telegram alert (kept as fallback when LLM is unavailable).
-        const newDiamonds = diamonds.filter((d) => insertedSet.has(d.fqdn));
+        // SSE-only live-feed events. Telegram alerts are sent EXCLUSIVELY via the
+        // strict alertDiamond() path above (AI-confirmed diamonds only). There is
+        // no score-based Telegram fallback — an unverified score must never alert.
         for (const d of newDiamonds.slice(0, 8)) {
           this.emitEvent({
             kind: "discovery",
-            message: `DIAMOND: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${d.strategy})`,
-            data: { fqdn: d.fqdn, category, strategy: d.strategy, valueScore: d.score.valueScore },
+            message: `AVAILABLE: ${d.fqdn} (score ${d.score.valueScore}, ${category}/${strategy})`,
+            data: { fqdn: d.fqdn, category, strategy, valueScore: d.score.valueScore },
           });
-          if (d.score.valueScore >= TELEGRAM_ALERT_THRESHOLD) {
-            queueTelegramAlert({
-              name: d.name,
-              fqdn: d.fqdn,
-              category,
-              strategy: d.strategy,
-              valueScore: d.score.valueScore,
-              pattern: d.score.pattern,
-              rationale: buildRationale({
-                name: d.name, tld: "com", category, strategy: d.strategy,
-                pattern: d.score.pattern, valueScore: d.score.valueScore,
-              }),
-              dnsEvidence: d.result.evidence,
-            });
-          }
         }
         if (newDiamonds.length > 8) {
           this.emitEvent({
             kind: "discovery",
-            message: `+${newDiamonds.length - 8} more diamonds saved this cycle`,
+            message: `+${newDiamonds.length - 8} more available names saved this cycle`,
           });
         }
       } catch (err) {

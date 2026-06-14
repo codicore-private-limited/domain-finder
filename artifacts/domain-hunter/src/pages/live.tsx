@@ -550,6 +550,7 @@ export function Live() {
         category,
         strategy: strategyFilter,
         length: lengthFilter,
+        sortBy: "value",
       }),
     refetchInterval: offset === 0 ? 4000 : false,
   });
@@ -580,7 +581,6 @@ export function Live() {
   const running = state?.running ?? false;
   const totalEvaluated = state?.totalEvaluated ?? 0;
   const totalChecked = state?.totalChecked ?? 0;
-  const totalDiscoveries = state?.totalDiscoveries ?? 0;
   const evaluatedPerSecond = state?.evaluatedPerSecond ?? 0;
   const checksPerSecond = state?.checksPerSecond ?? 0;
   const everSearched = state?.everSearchedSize ?? state?.recentNamesSize ?? 0;
@@ -593,10 +593,18 @@ export function Live() {
   const effectiveMinScore = state?.effectiveMinScore ?? 70;
   const totalInDb = discoveriesQuery.data?.total ?? 0;
 
-  const yieldPct = useMemo(() => {
-    if (totalChecked === 0) return 0;
-    return Math.round((totalDiscoveries / totalChecked) * 1000) / 10;
-  }, [totalChecked, totalDiscoveries]);
+  // Honest per-bucket diamond counts derived from the diamonds actually shown,
+  // so the sidebar never claims a diamond the vault list does not contain.
+  const diamondsByStrategy = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const d of allItems) m[d.strategy] = (m[d.strategy] ?? 0) + 1;
+    return m;
+  }, [allItems]);
+  const diamondsByCategory = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const d of allItems) m[d.category] = (m[d.category] ?? 0) + 1;
+    return m;
+  }, [allItems]);
 
   const hasMore = allItems.length < totalInDb;
 
@@ -757,8 +765,8 @@ export function Live() {
           sub={`${fmt(totalEvaluated)} total · in-memory`} accent="amber" />
         <HeroStat icon={<Radar className="h-4 w-4" />} label="DNS / sec" value={fmt(checksPerSecond)}
           sub={`${fmt(totalChecked)} probed · top-scored`} accent="cyan" />
-        <HeroStat icon={<Gem className="h-4 w-4" />} label="Diamonds in vault" value={fmt(totalDiscoveries)}
-          sub={`${yieldPct}% yield · all 5–7 letter`} accent="emerald" />
+        <HeroStat icon={<Gem className="h-4 w-4" />} label="Diamonds in vault" value={fmt(totalInDb)}
+          sub="RDAP-verified available .com · best first" accent="emerald" />
         <HeroStat icon={<ShieldCheck className="h-4 w-4" />} label="RDAP verified" value={fmt(rdapVerified)}
           sub={`${fmt(rdapRejected)} parked/sale rejected`} accent="violet" />
         <HeroStat icon={<Database className="h-4 w-4" />} label="Lifetime memory" value={fmt(everSearched)}
@@ -909,9 +917,9 @@ export function Live() {
           {!discoveriesQuery.isLoading && allItems.length === 0 && (
             <div className="rounded-lg border border-dashed border-border/60 px-6 py-16 text-center">
               <Gem className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
-              <h3 className="text-base font-semibold">No diamonds at this filter</h3>
+              <h3 className="text-base font-semibold">No finds at this filter yet</h3>
               <p className="mt-1 text-sm text-muted-foreground">
-                Lower the score gate, change category, or wait — the hunter is scanning in the background.
+                Change the category or length filter, or wait — the hunter is scanning 24/7 and new verified-available .com names land here automatically.
               </p>
             </div>
           )}
@@ -997,8 +1005,8 @@ export function Live() {
               <div className="divide-y divide-border/40">
                 {Object.entries(state.perStrategy)
                   .filter(([, v]) => v.checked > 0)
-                  .sort(([, a], [, b]) => b.diamonds - a.diamonds)
-                  .map(([key, v]) => {
+                  .sort(([ka], [kb]) => (diamondsByStrategy[kb] ?? 0) - (diamondsByStrategy[ka] ?? 0))
+                  .map(([key]) => {
                     const active = strategyFilter === key;
                     return (
                       <button
@@ -1022,7 +1030,7 @@ export function Live() {
                           {STRATEGY_LABEL[key] ?? key}
                         </span>
                         <span className="font-mono text-emerald-300 shrink-0">
-                          {v.diamonds.toLocaleString()} 💎
+                          {(diamondsByStrategy[key] ?? 0).toLocaleString()} 💎
                         </span>
                       </button>
                     );
@@ -1040,7 +1048,7 @@ export function Live() {
               <div className="divide-y divide-border/40">
                 {Object.entries(state.perCategory)
                   .filter(([, v]) => v.checked > 0)
-                  .sort(([, a], [, b]) => b.diamonds - a.diamonds)
+                  .sort(([ka], [kb]) => (diamondsByCategory[kb] ?? 0) - (diamondsByCategory[ka] ?? 0))
                   .map(([key, v]) => (
                     <button
                       key={key}
@@ -1059,7 +1067,7 @@ export function Live() {
                       </span>
                       <div className="flex items-center gap-2 shrink-0 text-[10px] text-muted-foreground">
                         <span>{v.checked.toLocaleString()} checked</span>
-                        <span className="font-mono text-emerald-300">{v.diamonds.toLocaleString()} 💎</span>
+                        <span className="font-mono text-emerald-300">{(diamondsByCategory[key] ?? 0).toLocaleString()} 💎</span>
                       </div>
                     </button>
                   ))}

@@ -11,7 +11,16 @@ export interface RawNewsItem {
   metadata: Record<string, unknown>;
 }
 
-const HN_TOP = "https://hn.algolia.com/api/v1/search_by_date?tags=story&hitsPerPage=50";
+// Two HackerNews feeds give us both signal and freshness:
+//  - front_page: current popular/top stories. These already carry real points
+//    and comments, so engagement is meaningful.
+//  - latest: freshly submitted stories (search_by_date). Often 0 points / 0
+//    comments, so they must NOT score high on recency alone (handled in the
+//    normalizer via the `feed` metadata flag).
+const HN_FRONT_PAGE =
+  "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=50";
+const HN_LATEST =
+  "https://hn.algolia.com/api/v1/search_by_date?tags=story&hitsPerPage=50";
 const REDDIT_FEEDS = [
   "https://www.reddit.com/r/technology/top.json?t=day&limit=40",
   "https://www.reddit.com/r/artificial/top.json?t=day&limit=40",
@@ -134,23 +143,42 @@ function parseDate(s: string | null): Date {
 }
 
 export async function fetchHackerNews(): Promise<RawNewsItem[]> {
-  const json = await fetchJson<{ hits: HnHit[] }>(HN_TOP);
-  if (!json?.hits) return [];
-  return json.hits
-    .filter((h) => h.title && h.title.trim().length > 0)
-    .map((h) => ({
-      source: "hackernews",
-      sourceId: h.objectID,
-      title: h.title!,
-      summary: h.story_text ?? null,
-      url: h.url ?? `https://news.ycombinator.com/item?id=${h.objectID}`,
-      publishedAt: new Date(h.created_at),
-      metadata: {
-        points: h.points ?? 0,
-        comments: h.num_comments ?? 0,
-        author: h.author ?? null,
-      },
-    }));
+  const [front, latest] = await Promise.all([
+    fetchJson<{ hits: HnHit[] }>(HN_FRONT_PAGE),
+    fetchJson<{ hits: HnHit[] }>(HN_LATEST),
+  ]);
+
+  const out: RawNewsItem[] = [];
+  const seen = new Set<string>();
+
+  // Front-page items are pushed first so they win de-duplication and keep their
+  // real engagement metrics. `feed` lets the normalizer cap zero-engagement
+  // "latest" posts that would otherwise ride high on recency alone.
+  const push = (hits: HnHit[] | undefined, feed: "front_page" | "latest") => {
+    for (const h of hits ?? []) {
+      if (!h.title || h.title.trim().length === 0) continue;
+      if (seen.has(h.objectID)) continue;
+      seen.add(h.objectID);
+      out.push({
+        source: "hackernews",
+        sourceId: h.objectID,
+        title: h.title,
+        summary: h.story_text ?? null,
+        url: h.url ?? `https://news.ycombinator.com/item?id=${h.objectID}`,
+        publishedAt: new Date(h.created_at),
+        metadata: {
+          points: h.points ?? 0,
+          comments: h.num_comments ?? 0,
+          author: h.author ?? null,
+          feed,
+        },
+      });
+    }
+  };
+
+  push(front?.hits, "front_page");
+  push(latest?.hits, "latest");
+  return out;
 }
 
 export async function fetchReddit(): Promise<RawNewsItem[]> {
@@ -210,11 +238,21 @@ export async function fetchArxiv(): Promise<RawNewsItem[]> {
 }
 
 // Google News RSS: real-time funding / breakthrough headlines. Free, no key.
+// Queries are deliberately narrow and category-anchored so the resulting
+// headlines map onto high-value commercial domain seeds instead of generic
+// "startup raises million" boilerplate.
 const GOOGLE_NEWS_QUERIES = [
-  "startup raises million funding",
-  "series A funding breakthrough technology",
-  "biotech FDA approval breakthrough",
-  "fusion energy hydrogen battery breakthrough",
+  "AI agent startup funding",
+  "AI infrastructure startup raises",
+  "cybersecurity AI startup raises",
+  "robotics startup funding",
+  "fusion energy startup funding",
+  "battery startup breakthrough",
+  "biotech gene therapy FDA approval",
+  "AI drug discovery funding",
+  "quantum computing startup funding",
+  "developer tools startup funding",
+  "data infrastructure startup funding",
 ];
 
 function googleNewsUrl(query: string): string {

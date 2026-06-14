@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+import { DIAMOND_THRESHOLD } from "./news/llm-diamond-filter";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
@@ -207,12 +208,12 @@ export async function sendStartupAlert(diamondCount: number): Promise<void> {
   const text = [
     `🚀 <b>Domain Hunter ARMED</b>`,
     ``,
-    `⚙️ Hunter started — scanning for 96%+ score diamonds`,
-    `💎 Current vault: <b>${diamondCount.toLocaleString()} diamonds</b>`,
-    `🎯 Alert threshold: Score ≥ 96`,
+    `⚙️ Scanning fresh .com registrations for investor-grade diamonds`,
+    `💎 Current vault: <b>${diamondCount.toLocaleString()} names</b>`,
+    `🎯 Alert rule: AI verdict = DIAMOND and score ≥ ${DIAMOND_THRESHOLD}`,
     `📡 Categories: AI · Quantum · Biotech · Green Energy · Space-Tech`,
     ``,
-    `<i>You'll be notified instantly when elite domains are found!</i>`,
+    `<i>You'll be notified instantly when an AI-verified diamond is found.</i>`,
   ].join("\n");
   await sendTelegramMessage(text);
 }
@@ -228,7 +229,7 @@ export async function testTelegramConnection(): Promise<{ ok: boolean; error?: s
     const data = (await res.json()) as { ok: boolean; result?: { username: string } };
     if (!data.ok) return { ok: false, error: "Telegram API returned ok=false" };
     await sendTelegramMessage(
-      `✅ <b>Domain Hunter connected!</b>\n\nBot: @${data.result?.username ?? "unknown"}\nAlerts will be sent here for 96%+ score diamonds.`,
+      `✅ <b>Domain Hunter connected!</b>\n\nBot: @${data.result?.username ?? "unknown"}\nAlerts will be sent here for AI-verified diamonds (score ≥ ${DIAMOND_THRESHOLD}).`,
     );
     return { ok: true };
   } catch (err) {

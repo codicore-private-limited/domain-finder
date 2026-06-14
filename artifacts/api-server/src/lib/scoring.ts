@@ -1,8 +1,9 @@
 import {
   detectRealWords, meaningfulSegments, COMMON_WORDS,
   phraseDemand, isRealPhrase, isRecognizableWord, isSellableDomain,
+  hasWeakGenericNoun, isHighValueCategoryPhrase,
 } from "./wordlists";
-import { checkTrademarkRisk } from "./trademark";
+import { checkTrademarkRisk, checkNegativeRisk } from "./trademark";
 
 /** High-frequency common words (for the "every segment is recognizable" bonus). */
 let _commonSet: Set<string> | null = null;
@@ -323,21 +324,60 @@ export function scoreCandidate(input: ScoreInput): ScoreOutput {
 
   const seg = meaningfulSegments(name);
   let value: number;
-  if (!seg || !isSellableDomain(name)) {
+  if (!seg || (!isSellableDomain(name) && !isHighValueCategoryPhrase(name))) {
     // Not a recognizable single word and not a real demand-corpus phrase →
     // gibberish, obscure scientific term, OR an arbitrary fused combo. Hard-cap
     // so it can NEVER pass the gate or look like a pick.
     value = Math.min(20, 5 + realWord * 0.3);
   } else {
     value = meaningfulValue(seg, name);
-    // .com is the benchmark; alternative TLDs are worth a little less.
+    const lower = name.toLowerCase();
     const t = tld.toLowerCase();
-    if (t !== "com") value -= t === "io" || t === "ai" ? 4 : 8;
-    // Company / trademark protection — never surface a brand-collision name
+
+    // ── Hard caps: strict premium-grade gate ───────────────────────────────
+    // A non-.com is never premium-grade.
+    if (t !== "com") {
+      value -= t === "io" || t === "ai" ? 4 : 8;
+      value = Math.min(value, 80);
+    }
+
+    const weakNoun = hasWeakGenericNoun(lower, seg);
+    const highValueCategory = isHighValueCategoryPhrase(lower);
+    const recognizable = isRecognizableWord(lower);
+    const realPhrase = isRealPhrase(lower);
+    const clearBuyer =
+      recognizable || highValueCategory || (realPhrase && phraseDemand(lower) >= 70);
+
+    // Generated two-word combo carrying a weak filler noun (modetab, ratiotube,
+    // sheetpanel) — decent/watchlist at best, never premium.
+    if (seg.length >= 2 && weakNoun && !highValueCategory) {
+      value = Math.min(value, 65);
+    } else if (weakNoun && !highValueCategory) {
+      value = Math.min(value, 75);
+    }
+
+    // Niche fused combo: neither a recognizable single word nor a known
+    // high-demand phrase/category — usable but ordinary.
+    if (!recognizable && !realPhrase && !highValueCategory) {
+      value = Math.min(value, 75);
+    }
+
+    // No clear commercial buyer pool.
+    if (!clearBuyer) {
+      value = Math.min(value, 55);
+    }
+
+    // Company / trademark protection — never surface a brand/celebrity collision
     // with a healthy score (protects the operator from legal exposure).
     const tm = checkTrademarkRisk(name);
-    if (tm.risk === "high") value = Math.min(value, 22);
-    else if (tm.risk === "medium") value = Math.max(40, value - 18);
+    if (tm.risk === "medium") value = Math.max(40, value - 18);
+
+    // Adult / gambling / pharma / spam / legal-negative content.
+    if (checkNegativeRisk(lower).flagged) value = Math.min(value, 25);
+
+    // Trademark / celebrity high risk wins over everything.
+    if (tm.risk === "high") value = Math.min(value, 20);
+
     value = Math.max(0, Math.min(99, value));
   }
 

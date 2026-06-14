@@ -869,3 +869,93 @@ export function isPerfectTwoWord(name: string): boolean {
   const seg = meaningfulSegments(name);
   return !!seg && seg.length === 2;
 }
+
+// ─────────────────────────────────────────────
+// PREMIUM-GRADE word signals — used by the strict diamond gate.
+// ─────────────────────────────────────────────
+
+/**
+ * WEAK / GENERIC FILLER NOUNS. A name containing one of these can still be a
+ * decent or watchlist domain, but must NOT be auto-classified as a diamond
+ * unless the FULL phrase is a known high-value commercial category
+ * (see {@link isHighValueCategoryPhrase}). These read as "wordlist output", not
+ * as a premium startup brand.
+ */
+export const WEAK_GENERIC_NOUNS: string[] = [
+  "tab", "tile", "ratio", "rack", "slot", "tube", "mode", "panel", "sheet",
+  "venue", "realm", "stage", "state", "yard", "wall", "lens", "pod",
+];
+const WEAK_GENERIC_SET = new Set(WEAK_GENERIC_NOUNS);
+
+/**
+ * HIGH-VALUE COMMERCIAL CATEGORY TERMS — strong, broadly-monetizable words that
+ * real funded startups build brands around. A compound made ENTIRELY of these
+ * (payflow, datahub, agentflow, cloudbase, healthgrid …) reads as a genuine
+ * category brand and is allowed to reach diamond grade.
+ */
+export const HIGH_VALUE_CATEGORY_TERMS: string[] = [
+  // finance / fintech
+  "pay", "bank", "loan", "credit", "cash", "fund", "invest", "trade", "wealth",
+  "finance", "fin", "money", "capital", "ledger",
+  // ai / dev / software
+  "ai", "agent", "cloud", "data", "code", "dev", "api", "app", "soft", "tech",
+  "cyber", "secure", "security", "compute", "stack", "engine", "core", "scale",
+  "sync", "flow", "hub", "base", "grid", "labs", "lab", "works", "forge", "ops",
+  // health / bio
+  "health", "care", "med", "bio", "gene", "clinic", "therapy", "neuro",
+  // commerce
+  "shop", "store", "market", "commerce", "retail", "deal", "checkout",
+  // crypto / web3
+  "crypto", "coin", "chain", "token", "wallet", "defi", "mint",
+  // energy / climate
+  "energy", "solar", "power", "green", "climate", "carbon", "grid",
+  // real estate / mobility
+  "estate", "realty", "property", "auto", "drive", "ride", "travel",
+  // saas-y product words with broad buyer pools
+  "user", "team", "work", "studio", "vault", "voice", "chat", "mail", "meet",
+  "board", "desk", "loop", "link", "wave", "pulse", "mind", "brain",
+];
+const HIGH_VALUE_CATEGORY_SET = new Set(HIGH_VALUE_CATEGORY_TERMS);
+
+/** True when a single word segment is a weak/generic filler noun. */
+export function isWeakGenericNoun(segment: string): boolean {
+  return WEAK_GENERIC_SET.has(segment.toLowerCase());
+}
+
+/**
+ * True when the name contains a weak/generic filler noun as one of its word
+ * segments (e.g. "modetab", "ratiotube", "sheetpanel"). Optionally pass a
+ * pre-computed segmentation to avoid recomputing.
+ */
+export function hasWeakGenericNoun(name: string, segments?: string[] | null): boolean {
+  const lower = name.toLowerCase().replace(/[^a-z]/g, "");
+  const segs = segments ?? meaningfulSegments(lower);
+  if (segs && segs.length > 0) {
+    return segs.some((w) => WEAK_GENERIC_SET.has(w));
+  }
+  // No clean split — fall back to a boundary check (prefix/suffix only).
+  return WEAK_GENERIC_NOUNS.some((w) => lower.startsWith(w) || lower.endsWith(w));
+}
+
+/**
+ * True when the name is a KNOWN high-value commercial category — the only case
+ * in which a weak-noun or longer name is still allowed to reach diamond grade.
+ * Accepts either:
+ *   1. a curated real phrase with strong measured demand, or
+ *   2. a compound whose every segment is a high-value category term and none of
+ *      which is a weak filler noun (payflow, datahub, cloudbase …), or
+ *   3. a single recognizable high-value category word (vault, wallet …).
+ */
+export function isHighValueCategoryPhrase(name: string): boolean {
+  const lower = name.toLowerCase().replace(/[^a-z]/g, "");
+  if (isRealPhrase(lower) && phraseDemand(lower) >= 85) return true;
+  const seg = meaningfulSegments(lower);
+  if (!seg || seg.length === 0) return false;
+  if (seg.length === 1) {
+    return HIGH_VALUE_CATEGORY_SET.has(seg[0]!) && isRecognizableWord(lower);
+  }
+  return (
+    seg.every((w) => HIGH_VALUE_CATEGORY_SET.has(w)) &&
+    !seg.some((w) => WEAK_GENERIC_SET.has(w))
+  );
+}

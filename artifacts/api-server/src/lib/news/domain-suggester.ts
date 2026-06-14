@@ -1,7 +1,7 @@
 import { db, discoveriesTable, dnsCacheTable, domainSeedsTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { logger } from "../logger";
-import { chatJSON, llmAvailable } from "../llm";
+import { chatJSON, llmAvailable, generatorModel } from "../llm";
 import { dnsAvailabilityBatch } from "../availability";
 import { rdapDotComCheck } from "../rdap";
 import { isSellableDomain, VERB_NOUN_POOL } from "../wordlists";
@@ -9,8 +9,7 @@ import { scoreCandidate } from "../scoring";
 import { checkTrademarkRisk } from "../trademark";
 import { filterLegallyAllowed } from "../legal/gate";
 import { buildRationale } from "../groq";
-import { alertDiamond, evaluateDiamond } from "./llm-diamond-filter";
-import type { DiamondEvaluation } from "./llm-diamond-filter";
+import { evaluateDiamond, evaluateLocalDiamond, alertDiamond } from "./llm-diamond-filter";
 import type { DomainSeedRow } from "@workspace/db";
 
 /**
@@ -18,22 +17,43 @@ import type { DomainSeedRow } from "@workspace/db";
  *
  * Architecture (exactly what the user asked for):
  *   1. Get fresh high-signal news/funding seeds (from domain_seeds table)
- *   2. Ask LLM to generate ONLY premium diamond-quality .com names
- *      (50+ factors applied DURING generation — the AI quality gate is FIRST)
+ *   2. Ask the LLM to generate ONLY premium, investor-grade .com candidates
+ *      across three lanes (unicorn brandable / category killer / premium SaaS)
  *   3. DNS + RDAP check only those premium names (fast, tiny list)
- *   4. If available → immediate Telegram alert + save to discoveries
+ *   4. After RDAP confirms availability + legal gate passes, run the STRICT final
+ *      evaluation (evaluateDiamond). Save the name classified by verdict; send a
+ *      Telegram alert ONLY for confirmed diamonds (alertDiamond). Drop 'skip'.
  *
- * This means: 10-15 quality names checked per seed, NOT 280K junk combinations.
- * 1-2 real diamonds per day > 16,000 junk names to scroll through.
+ * Two real words do NOT make a diamond. Watchlist/decent names are kept as
+ * inventory but never trigger an alert. 1-2 real diamonds > 16,000 junk names.
  */
 
 const CANDIDATES_PER_SEED = 12;
 const MAX_SEEDS_PER_RUN = 8;
 const DNS_CONCURRENCY = 20;
 
+function normalizeCandidateName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/\.com\.?$/i, "")
+    .replace(/[^a-z]/g, "")
+    .trim();
+}
+
+function isCleanLlmCandidate(name: string): boolean {
+  if (name.length < 4 || name.length > 12) return false;
+  if (!/^[a-z]+$/.test(name)) return false;
+  if (/[bcdfghjklmnpqrstvwxyz]{4}/i.test(name)) return false;
+  if (/[aeiou]{4}/i.test(name)) return false;
+  return true;
+}
+
 /**
- * Ask the LLM to generate ONLY diamond-quality domain names.
- * 50 factors are applied INSIDE the prompt — quality gate is BEFORE DNS check.
+ * Ask the LLM to generate ONLY premium, investor-grade .com names across three
+ * lanes (unicorn brandable / category killer / premium SaaS two-word). The model
+ * is told quality beats quantity — returning 3 great names is better than 20 weak
+ * ones. Uses LLM_GENERATOR_MODEL when configured.
  */
 async function llmGenerateDiamondCandidates(
   keyword: string,
@@ -42,66 +62,99 @@ async function llmGenerateDiamondCandidates(
 ): Promise<string[]> {
   if (!llmAvailable()) return fallbackGenerate(keyword);
 
-  const prompt = `You are a world-class domain investor. Your job is to generate a VERY SHORT list of genuinely investment-grade .com domain names based on this keyword: "${keyword}" (category: ${category}, context: ${trendContext}).
+  const prompt = `You are a world-class startup naming strategist and premium .com domain investor.
 
-STRICT 50-FACTOR QUALITY GATE — every name you suggest MUST pass ALL of these:
+Your job is NOT to generate many names.
+Your job is to generate only names that could realistically become a serious startup/company brand.
 
-LENGTH (must pass ALL):
-✅ 5-10 characters total (ideal: 6-8)
-✅ 1-2 syllables per word
-✅ No hyphens, no numbers
-✅ Letters only, all lowercase
+Seed keyword:
+"${keyword}"
 
-PHONETICS (must pass ALL):
-✅ Easy to say out loud (radio test: spell it on a phone call)
-✅ Easy to spell when heard
-✅ No awkward consonant clusters (sth, fgh, etc.)
-✅ Sounds like a real company name
-✅ No ambiguous letters
+Category:
+"${category}"
 
-COMMERCIAL VALUE (must pass at least 3):
-✅ Contains a high-value keyword: pay, bank, loan, credit, cash, fund, invest, trade, wealth, ai, cloud, data, health, care, law, estate, crypto, shop, market, auto, travel
-✅ Verb + noun pattern (setuser, payflow, getloan, aibase)
-✅ Would a startup genuinely want this as their company domain?
-✅ Multiple industries could use it
-✅ Someone would pay $2,000+ for it
+Trend context:
+"${trendContext}"
 
-REJECT IMMEDIATELY (if any apply):
-❌ Generic filler combos (tagruntime, notefee, modetab, logwait)
-❌ Doesn't sound like a real company
-❌ Too generic with no commercial keyword
-❌ Contains known trademark (avoid: meta, google, apple, amazon...)
-❌ Technical jargon that doesn't translate to a product
+Generate candidates in 3 lanes:
 
-Generate MAXIMUM ${CANDIDATES_PER_SEED} names. Include ONLY names that pass ALL quality factors above.
-Most keywords will produce 3-6 quality names, not 12. If fewer qualify, return fewer.
+LANE A - UNICORN BRANDABLES:
+- 5-8 letters preferred
+- pronounceable in one clear way
+- passes radio test
+- easy spelling
+- premium startup feel
+- can work across multiple industries
+- not a literal awkward two-word combo
+- not random gibberish
+- must feel founder-friendly and investor-friendly
 
-Return ONLY valid JSON: { "names": ["name1", "name2", ...] }`;
+LANE B - CATEGORY KILLER .COM:
+- one strong English word, or
+- ultra-clear commercial compound
+- high buyer intent
+- broad startup use
+- examples of pattern: payflow, datahub, agentflow, cloudbase, healthgrid
+
+LANE C - PREMIUM SAAS TWO-WORD:
+- verb + high-value noun or noun + high-value noun
+- must sound like a real product/company
+- must have obvious buyers
+- avoid weak nouns like tab, tile, ratio, mode, rack, slot, tube unless the full phrase is a real category
+
+STRICT REJECT:
+- no hyphens
+- no numbers
+- no adult/spam/pharma/gambling/legal-negative words
+- no trademark names
+- no celebrity/brand/company names
+- no awkward generated combos
+- no names that need explanation
+- no names longer than 10 chars unless extremely strong
+- no "two real words" unless the phrase has strong commercial meaning
+- reject names like skilluser, linetile, modetab, tagruntime, ratiotube as diamond candidates
+
+Return maximum ${CANDIDATES_PER_SEED} names.
+If only 3 are truly good, return 3.
+Do not fill the list with weak names.
+
+Return ONLY valid JSON:
+{
+  "names": [
+    {
+      "name": "example",
+      "lane": "unicorn_brandable" | "category_killer" | "premium_saas",
+      "why": "short reason"
+    }
+  ]
+}`;
 
   try {
-    const parsed = await chatJSON<{ names?: string[] }>(
+    const parsed = await chatJSON<{ names?: Array<{ name?: string; lane?: string; why?: string } | string> }>(
       [
-        { role: "system", content: "You are a strict domain investment expert. Only suggest genuinely valuable .com names. Most suggestions should be rejected. Output only valid JSON." },
+        { role: "system", content: "You are a world-class startup naming strategist and premium .com investor. Generate only investor-grade names. Quality over quantity. Output only valid JSON." },
         { role: "user", content: prompt },
       ],
-      { temperature: 0.5, timeoutMs: 25000 },
+      { temperature: 0.6, timeoutMs: 25000, model: generatorModel() },
     );
 
-    if (!parsed?.names) return fallbackGenerate(keyword);
+    if (!parsed?.names || !Array.isArray(parsed.names)) return fallbackGenerate(keyword);
 
+    const seen = new Set<string>();
     const clean = parsed.names
+      .map((entry) => (typeof entry === "string" ? entry : entry?.name))
       .filter((n): n is string => typeof n === "string")
-      .map((n) => n.toLowerCase().replace(/[^a-z]/g, "").trim())
+      .map(normalizeCandidateName)
       .filter((n) => {
-        if (n.length < 5 || n.length > 12) return false;
-        if (!/^[a-z]+$/.test(n)) return false;
-        // Quick reject for obvious junk patterns
-        if (/[bcdfghjklmnpqrstvwxyz]{3}/i.test(n)) return false;
+        if (!isCleanLlmCandidate(n)) return false;
+        if (checkTrademarkRisk(n).risk !== "low") return false;
+        if (seen.has(n)) return false;
+        seen.add(n);
         return true;
       })
       .slice(0, CANDIDATES_PER_SEED);
 
-    logger.info({ keyword, count: clean.length, names: clean }, "LLM diamond candidates generated");
+    logger.info({ keyword, count: clean.length, names: clean }, "LLM premium candidates generated");
     return clean.length > 0 ? clean : fallbackGenerate(keyword);
   } catch (err) {
     logger.debug({ err }, "LLM generation failed");
@@ -115,25 +168,6 @@ function fallbackGenerate(keyword: string): string[] {
   return VERB_NOUN_POOL
     .filter((n) => n.includes(kw.slice(0, 4)) || n.startsWith(kw.slice(0, 3)))
     .slice(0, 8);
-}
-
-function formatEvaluation(evaluation: DiamondEvaluation | null): {
-  diamondReason: string | null;
-  rationaleSuffix: string;
-} {
-  if (!evaluation) {
-    return {
-      diamondReason: null,
-      rationaleSuffix: "[AI evaluation unavailable]",
-    };
-  }
-
-  const factorText = evaluation.factors.length > 0 ? ` Factors: ${evaluation.factors.join(" · ")}` : "";
-  const summary = `AI eval ${evaluation.score}/100: ${evaluation.reason}${factorText}`;
-  return {
-    diamondReason: `${evaluation.reason}${factorText}`,
-    rationaleSuffix: `[${summary}]`,
-  };
 }
 
 /**
@@ -169,11 +203,13 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
       const raw = await llmGenerateDiamondCandidates(seed.keyword, seed.category, trendCtx);
       generated += raw.length;
 
-      // Quality gate: must be sellable + no trademark risk + not already checked
+      // Quality gate: AI already applied the strict 50-factor prompt. Keep the
+      // old static sellable gate as a bonus, but don't let it block every new
+      // AI-coined candidate before DNS. Structural + TM checks still apply.
       const candidates = raw.filter((n) => {
         if (knownFqdns.has(n + ".com")) return false;
-        if (!isSellableDomain(n)) return false;
-        if (checkTrademarkRisk(n).risk === "high") return false;
+        if (!isSellableDomain(n) && !isCleanLlmCandidate(n)) return false;
+        if (checkTrademarkRisk(n).risk !== "low") return false;
         return true;
       });
 
@@ -196,29 +232,55 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
         logger.info({ available }, "🎯 DNS says available — RDAP verifying...");
       }
 
-      // RDAP verify each available (authoritative for .com)
+      // RDAP verify each available (authoritative for .com), then run the strict
+      // final evaluation. Telegram fires ONLY for confirmed diamonds.
       for (const name of available) {
         const fqdn = name + ".com";
         try {
           const rdap = await rdapDotComCheck(fqdn);
           if (rdap.verdict !== "available") continue;
 
-          const score = scoreCandidate({ name, tld: "com", trendKeywords: [seed.keyword] });
-          const rationale = buildRationale({ name, tld: "com", category: seed.category, strategy: "news_driven", pattern: score.pattern, valueScore: score.valueScore });
-
+          // Legal / trademark gate must pass before anything is persisted.
           const legalResult = await filterLegallyAllowed([{ name, fqdn, tld: "com" }]);
           if (legalResult.allowed.length === 0) continue;
 
-          const evaluation = await evaluateDiamond(name, "com", {
+          // Deterministic inventory score + cheap local diamond gate first.
+          const score = scoreCandidate({ name, tld: "com", trendKeywords: [seed.keyword] });
+          const localEval = evaluateLocalDiamond(name, "com", {
             category: seed.category,
             trendKeywords: [seed.keyword],
-          }).catch((err) => {
-            logger.debug({ err, fqdn }, "LLM diamond evaluation failed");
-            return null;
           });
 
-          const formattedEvaluation = formatEvaluation(evaluation);
-          const storedRationale = `${rationale} ${formattedEvaluation.rationaleSuffix}`;
+          // Spend a scarce LLM evaluation ONLY on names the cheap local gate
+          // already rates diamond-grade or strong. Weak combos are trusted from
+          // the local gate (saved as inventory, never alerted). This is what
+          // keeps 24/7 discovery alive within the free LLM token quotas instead
+          // of burning the daily limit on names that can never be diamonds.
+          let evaluation = localEval;
+          if (localEval.verdict === "diamond" || localEval.verdict === "strong_watchlist") {
+            const llmEval = await evaluateDiamond(name, "com", {
+              category: seed.category,
+              trendKeywords: [seed.keyword],
+            });
+            if (llmEval) evaluation = llmEval;
+          }
+
+          // Drop genuinely useless names; keep watchlist/decent as inventory.
+          if (evaluation.verdict === "skip") {
+            knownFqdns.add(fqdn);
+            continue;
+          }
+
+          const isDiamond = Boolean(evaluation.isDiamond);
+          const verdict = evaluation.verdict;
+          const baseRationale = buildRationale({
+            name, tld: "com", category: seed.category, strategy: "news_driven",
+            pattern: score.pattern, valueScore: score.valueScore,
+          });
+          const factorNote = evaluation.factors?.length
+            ? ` Factors: ${evaluation.factors.slice(0, 3).join(", ")}.`
+            : "";
+          const rationale = `[LLM news seed "${seed.keyword}" (${seed.origin}) · ${verdict}] ${baseRationale}${factorNote}`;
 
           await db.insert(discoveriesTable).values({
             fqdn, name, tld: "com",
@@ -229,11 +291,12 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             valueScore: String(score.valueScore),
             memorability: score.memorability,
             radioTest: score.radioTest ? 1 : 0,
-            rationale: `[LLM-generated from "${seed.keyword}"] ${storedRationale}`,
+            rationale,
             dnsEvidence: rdap.evidence,
-            isDiamond: evaluation?.isDiamond ?? false,
-            diamondScore: evaluation ? String(evaluation.score) : null,
-            diamondReason: formattedEvaluation.diamondReason,
+            // isDiamond is true ONLY for AI/deterministic-confirmed diamonds.
+            isDiamond,
+            diamondScore: String(evaluation.score),
+            diamondReason: evaluation.reason,
           }).onConflictDoNothing({ target: discoveriesTable.fqdn });
 
           await db.insert(dnsCacheTable).values({
@@ -243,16 +306,16 @@ export async function runDomainSuggester(): Promise<{ generated: number; checked
             set: { signal: sql`excluded.signal`, evidence: sql`excluded.evidence`, checkedAt: sql`excluded.checked_at` },
           });
 
-          if (evaluation?.isDiamond) {
+          // Telegram ONLY for confirmed diamonds — single alertDiamond() path.
+          if (isDiamond) {
             await alertDiamond(name, "com", evaluation, rdap.evidence);
+            logger.info({ fqdn, seed: seed.keyword, score: evaluation.score }, "LLM diamond saved + Telegram sent");
+          } else {
+            logger.info({ fqdn, seed: seed.keyword, verdict }, "Saved non-diamond inventory (no alert)");
           }
 
           saved++;
           knownFqdns.add(fqdn);
-          logger.info(
-            { fqdn, seed: seed.keyword, isDiamond: evaluation?.isDiamond ?? false, diamondScore: evaluation?.score ?? null },
-            evaluation?.isDiamond ? "💎 LLM diamond saved + Telegram sent" : "Available LLM candidate saved",
-          );
         } catch (err) {
           logger.debug({ err, fqdn }, "RDAP check failed");
         }

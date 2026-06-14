@@ -1,174 +1,429 @@
-import { chatJSON, llmAvailable } from "../llm";
+import { chatJSON, llmAvailable, evaluatorModel } from "../llm";
 import { logger } from "../logger";
-import { sendExpiringAlert } from "../telegram";
-import type { ExpiringAlertPayload } from "../telegram";
+import { scoreCandidate, hasAwkwardCluster } from "../scoring";
+import { checkTrademarkRisk, checkNegativeRisk } from "../trademark";
+import {
+  hasWeakGenericNoun,
+  isHighValueCategoryPhrase,
+  isRealPhrase,
+  isRecognizableWord,
+  meaningfulSegments,
+  phraseDemand,
+} from "../wordlists";
 
 /**
- * LLM-powered diamond quality gate.
+ * Strict premium-.com diamond gate.
  *
- * This is the AI brain that sits between "available .com found" and "send Telegram
- * alert". It applies 50+ professional domain investment criteria so only GENUINE
- * diamonds surface — not junk like tagresponse.com or tagruntime.com.
+ * Sits between "available .com found" and "send Telegram alert". Two real words
+ * do NOT make a diamond — only rare, premium, commercially powerful names that a
+ * serious startup / potential unicorn could proudly use as its company name.
+ *
+ *   skip             0-59    awkward / weak / risky / wordlist output
+ *   decent           60-74   usable, niche or ordinary buyer pool
+ *   strong_watchlist 75-87   good, sellable, not rare enough for diamond
+ *   diamond          >=THRESHOLD  exceptional, investor-grade
  *
  * Goal: 1-2 real diamonds per day, not 16,000 junk names.
  */
 
+export type DiamondVerdict = "diamond" | "strong_watchlist" | "decent" | "skip";
+
 export interface DiamondEvaluation {
-  score: number;        // 0-100
-  isDiamond: boolean;   // score >= DIAMOND_THRESHOLD
-  reason: string;       // short human explanation
-  factors: string[];    // list of key positive/negative signals
+  score: number;                 // 0-100
+  verdict: DiamondVerdict;
+  isDiamond: boolean;            // score >= DIAMOND_THRESHOLD AND verdict === "diamond"
+  reason: string;               // short human explanation
+  factors: string[];            // key positive/negative signals
+  estimatedRetailUsd?: { low: number; high: number };
+  buyerTypes?: string[];
+  redFlags?: string[];
 }
 
-const parsedDiamondThreshold = Number(process.env.DIAMOND_THRESHOLD ?? 88);
-const DIAMOND_THRESHOLD = Number.isFinite(parsedDiamondThreshold)
-  ? Math.max(0, Math.min(100, parsedDiamondThreshold))
-  : 88;
-
-const HIGH_INTENT_KEYWORDS = [
-  "agent", "auth", "bank", "capital", "care", "cash", "clinic", "cloud", "credit", "crypto",
-  "data", "fund", "health", "identity", "invest", "legal", "loan", "market", "pay", "robot",
-  "secure", "security", "shop", "trade", "travel", "vault", "wallet", "wealth",
-];
-
-// These are only used to fast-reject obviously ordinary two-word combos when
-// both sides are low-intent and the overall name lacks any stronger commercial
-// keyword. A single word from this list is not enough to reject a name.
-const LOW_SIGNAL_WORDS = new Set([
-  "tab", "tag", "tile", "line", "mode", "runtime", "loop", "slot", "lane", "pool",
-  "span", "tube", "wire", "note", "table", "sheet", "scene", "slate", "theme",
-  "vector", "pair", "route",
-]);
-
-function hasHighIntentKeyword(name: string): boolean {
-  return HIGH_INTENT_KEYWORDS.some((keyword) => name.includes(keyword));
+function clampInt(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-function ordinaryTwoWordCombo(name: string): string[] | null {
-  for (let i = 3; i <= name.length - 3; i += 1) {
-    const left = name.slice(0, i);
-    const right = name.slice(i);
-    if (LOW_SIGNAL_WORDS.has(left) && LOW_SIGNAL_WORDS.has(right)) {
-      return [left, right];
-    }
-  }
+// Only names scoring this high get diamond treatment. DIAMOND_THRESHOLD is the
+// primary env; legacy AI_DIAMOND_THRESHOLD is still honored. Default 88.
+export const DIAMOND_THRESHOLD = (() => {
+  const raw = process.env.DIAMOND_THRESHOLD ?? process.env.AI_DIAMOND_THRESHOLD;
+  const value = Number(raw);
+  return Number.isFinite(value) ? clampInt(value, 60, 100) : 88;
+})();
+
+const VERDICT_RANK: Record<DiamondVerdict, number> = {
+  skip: 0,
+  decent: 1,
+  strong_watchlist: 2,
+  diamond: 3,
+};
+
+/** Map a final 0-100 score to a verdict band. */
+function verdictForScore(score: number): DiamondVerdict {
+  if (score >= DIAMOND_THRESHOLD) return "diamond";
+  if (score >= 75) return "strong_watchlist";
+  if (score >= 60) return "decent";
+  return "skip";
+}
+
+/** Return the stricter (lower-ranked) of two verdicts. */
+function stricterVerdict(a: DiamondVerdict, b: DiamondVerdict): DiamondVerdict {
+  return VERDICT_RANK[a] <= VERDICT_RANK[b] ? a : b;
+}
+
+/** Parse a model-provided verdict string into our enum (or null). */
+function normalizeVerdict(v: unknown): DiamondVerdict | null {
+  const s = String(v ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (s === "diamond" || s === "strong_watchlist" || s === "decent" || s === "skip") return s;
+  if (s === "watchlist" || s === "strong") return "strong_watchlist";
   return null;
 }
 
-// Skip LLM for names already known to be weak (saves API budget).
-function quickReject(name: string): { reject: boolean; reason: string } {
-  const len = name.length;
-  if (len > 12) return { reject: true, reason: "too long (>12 chars)" };
-  if (len < 5)  return { reject: true, reason: "too short (<5 chars)" };
-  // 3+ consecutive consonants
-  if (/[bcdfghjklmnpqrstvwxyz]{3}/i.test(name)) return { reject: true, reason: "awkward consonant cluster" };
-  // Starts or ends with a number
-  if (/^\d|\d$/.test(name)) return { reject: true, reason: "starts/ends with digit" };
-  if (!hasHighIntentKeyword(name)) {
-    const weakCombo = ordinaryTwoWordCombo(name);
-    if (weakCombo) {
-      return {
-        reject: true,
-        reason: `ordinary low-intent combo (${weakCombo[0]} + ${weakCombo[1]})`,
-      };
-    }
-  }
-  return { reject: false, reason: "" };
+function verdictLabel(v: DiamondVerdict): string {
+  if (v === "strong_watchlist") return "Strong watchlist";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+}
+
+function sanitizeStrings(arr: unknown, max: number): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((x): x is string => typeof x === "string")
+    .map((s) => s.trim().slice(0, 100))
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function sanitizeRetail(v: unknown): { low: number; high: number } | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as { low?: unknown; high?: unknown };
+  const low = Number(o.low);
+  const high = Number(o.high);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return undefined;
+  const lo = Math.max(0, Math.round(low));
+  const hi = Math.max(lo, Math.round(high));
+  return { low: lo, high: hi };
 }
 
 /**
- * Evaluate a domain using the LLM (50 factors) + fast pre-checks.
- * Returns null if LLM is unavailable; caller falls back to heuristic score.
+ * Deterministic diamond gate — used directly when the LLM judge is unavailable,
+ * rate-limited, or pending, and as the hard-cap guard on the LLM result. It is
+ * intentionally CONSERVATIVE: when the AI cannot confirm a name, only an
+ * unambiguously exceptional .com (a clean short recognizable word or a recognized
+ * high-value commercial category) is allowed to reach diamond grade.
+ */
+export function evaluateLocalDiamond(
+  name: string,
+  tld = "com",
+  context?: { category?: string; trendKeywords?: string[] },
+): DiamondEvaluation {
+  const lower = name.toLowerCase().replace(/[^a-z]/g, "");
+  const trendKeywords = context?.trendKeywords ?? [];
+  const base = scoreCandidate({ name: lower, tld, trendKeywords });
+  const segments = meaningfulSegments(lower);
+  const tm = checkTrademarkRisk(lower);
+  const neg = checkNegativeRisk(lower);
+  const factors: string[] = [];
+
+  // scoreCandidate already applies the deterministic hard caps (TM, negative,
+  // weak noun, no-buyer, niche, non-.com). Start from that capped value.
+  let score = base.valueScore;
+
+  const recognizable = isRecognizableWord(lower);
+  const realPhrase = isRealPhrase(lower);
+  const highValueCategory = isHighValueCategoryPhrase(lower);
+  const weakNoun = hasWeakGenericNoun(lower, segments);
+
+  if (recognizable) factors.push("recognizable one-word .com");
+  else if (realPhrase) factors.push(`known phrase (demand ${phraseDemand(lower)}/100)`);
+  else if (segments && segments.length >= 2) factors.push(`real-word split: ${segments.join(" + ")}`);
+  if (highValueCategory) factors.push("high-value commercial category");
+  if (weakNoun && !highValueCategory) factors.push("contains weak/generic filler noun");
+  factors.push(base.radioTest ? "passes radio test" : "weak radio test");
+
+  const redFlags: string[] = [];
+  if (tm.risk === "high") {
+    score = Math.min(score, 20);
+    factors.push("trademark/celebrity collision");
+    redFlags.push("trademark risk");
+  } else if (tm.risk === "medium") {
+    score = Math.min(score, 60);
+    factors.push("medium trademark risk");
+    redFlags.push("possible trademark overlap");
+  }
+  if (neg.flagged) {
+    score = Math.min(score, 25);
+    factors.push(`disallowed ${neg.category} content`);
+    redFlags.push(`${neg.category} content`);
+  }
+
+  score = clampInt(score, 0, 100);
+  let verdict = verdictForScore(score);
+
+  // Extra-conservative deterministic diamond guard: when the LLM is unavailable
+  // we only trust UNAMBIGUOUSLY exceptional names. Anything else is held at
+  // strong_watchlist until the AI can confirm it.
+  if (verdict === "diamond") {
+    const trustworthy =
+      base.radioTest &&
+      tm.risk === "low" &&
+      !neg.flagged &&
+      !weakNoun &&
+      lower.length <= 10 &&
+      (recognizable || highValueCategory);
+    if (!trustworthy) {
+      score = Math.min(score, 80);
+      verdict = verdictForScore(score);
+      factors.push("held below diamond pending AI confirmation");
+    }
+  }
+
+  const isDiamond = score >= DIAMOND_THRESHOLD && verdict === "diamond";
+  const reason = isDiamond
+    ? `Deterministic gate: exceptional ${recognizable ? "one-word" : "category"} .com — ${factors.slice(0, 2).join("; ")}.`
+    : `${verdictLabel(verdict)} (${score}/100): ${factors.slice(0, 3).join("; ")}.`;
+
+  return {
+    score,
+    verdict,
+    isDiamond,
+    reason,
+    factors: factors.slice(0, 6),
+    buyerTypes: [],
+    redFlags,
+  };
+}
+
+// Hard pre-filter. A rejected name can never be a diamond and skips the LLM.
+function quickReject(name: string): { reject: boolean; reason: string } {
+  const len = name.length;
+  if (/[^a-z]/.test(name)) return { reject: true, reason: "contains digit/hyphen/non-letter" };
+  if (len < 4) return { reject: true, reason: "too short (<4 chars)" };
+  if (len > 10 && !isHighValueCategoryPhrase(name)) {
+    return { reject: true, reason: "too long (>10 chars) and not a high-value phrase" };
+  }
+  if (hasAwkwardCluster(name)) return { reject: true, reason: "awkward consonant cluster" };
+  const neg = checkNegativeRisk(name);
+  if (neg.flagged) return { reject: true, reason: `disallowed ${neg.category} content` };
+  if (checkTrademarkRisk(name).risk === "high") return { reject: true, reason: "trademark/celebrity collision" };
+  return { reject: false, reason: "" };
+}
+
+const EVALUATOR_SYSTEM_PROMPT =
+  "You are a brutally strict premium .com domain investor and startup naming judge.\n" +
+  "Most generated domains are bad. Your job is to prevent false positives.\n" +
+  "Only exceptional, investor-grade domains can be diamonds.";
+
+interface RawEvaluation {
+  score?: number;
+  verdict?: string;
+  isDiamond?: boolean;
+  estimatedRetailUsd?: { low?: unknown; high?: unknown };
+  buyerTypes?: unknown;
+  reason?: string;
+  top_factors?: unknown;
+  red_flags?: unknown;
+}
+
+/**
+ * Final strict evaluation: AI judge + deterministic hard caps. Returns the local
+ * deterministic verdict when the LLM is unavailable. isDiamond is computed by US,
+ * never trusted from the model, and is only true when score >= DIAMOND_THRESHOLD
+ * AND the verdict is "diamond".
  */
 export async function evaluateDiamond(
   name: string,
   tld = "com",
   context?: { category?: string; trendKeywords?: string[] },
 ): Promise<DiamondEvaluation | null> {
-  const quick = quickReject(name);
-  if (quick.reject) {
+  const raw = name.toLowerCase().trim();
+  const lower = raw.replace(/[^a-z]/g, "");
+
+  // A digit or hyphen in the requested name is an immediate skip (premium .com
+  // brands never carry them). Check the RAW input before letters-only stripping.
+  if (/[0-9]/.test(raw) || raw.includes("-")) {
     return {
       score: 10,
+      verdict: "skip",
       isDiamond: false,
-      reason: quick.reason,
-      factors: [`rejected: ${quick.reason}`],
+      reason: "Rejected: contains a digit or hyphen.",
+      factors: ["rejected: contains digit/hyphen"],
+      redFlags: ["digit/hyphen"],
     };
   }
 
-  if (!llmAvailable()) return null;
+  const quick = quickReject(lower);
+  if (quick.reject) {
+    return {
+      score: 10,
+      verdict: "skip",
+      isDiamond: false,
+      reason: `Rejected: ${quick.reason}.`,
+      factors: [`rejected: ${quick.reason}`],
+      redFlags: [quick.reason],
+    };
+  }
 
-  const trendCtx = context?.trendKeywords?.slice(0, 5).join(", ") ?? "general";
-  const cat = context?.category ?? "tech";
+  const local = evaluateLocalDiamond(lower, tld, context);
+  if (!llmAvailable()) return local;
 
-  const prompt = `You are a highly selective domain investor. Evaluate "${name}.${tld}" for resale quality.
+  const category = context?.category ?? "general";
+  const trendKeywords = context?.trendKeywords?.slice(0, 6).join(", ") || "none";
 
-Classify it using these strict buckets:
-- investment_grade: true diamond only. Must have a broad buyer pool, strong startup/company feel, clear commercial intent, and realistic $2k+ end-user resale potential.
-- decent: pronounceable and somewhat brandable, but ordinary, niche, limited-buyer, or missing clear commercial urgency.
-- skip: awkward, weak, low buyer pool, low intent, negative, spammy, adult, or trademark-risky.
+  const userPrompt = `Evaluate this domain:
+"${lower}.com"
 
-Critical scoring rules:
-- Most AI-generated domains should score below 60.
-- Scores 60-79 should be uncommon and reserved for above-average names.
-- Scores 80-87 can be strong but still NOT investment_grade if the buyer pool is narrow or the name feels ordinary.
-- Only exceptional domains should reach ${DIAMOND_THRESHOLD}+ and investment_grade.
-- Never reward a domain just because it is two real words.
-- Random verb+noun or noun+noun combos like linetile, modetab, tagruntime, linepool, notewire, or similar ordinary generated names should usually be skip or low decent.
-- Penalize names that sound like internal tooling, technical fragments, UI labels, filler nouns, or weak combinations with no clear high-value buyer category.
+Context:
+Category: ${category}
+Trend keywords: ${trendKeywords}
 
-Evaluate these factors with strict judgment:
-1. Broad buyer pool across multiple real companies or startups
-2. Strong commercial or high-intent category fit
-3. Clean phonetics, spelling, and memorability
-4. Premium company-brand feel rather than auto-generated phrase feel
-5. Realistic end-user resale potential above $2k
-6. No obvious trademark, adult, spam, scam, or negative-risk signals
+Your job:
+Decide whether this is TRUE DIAMOND, STRONG WATCHLIST, DECENT, or SKIP.
 
-Context: category=${cat}; trend_keywords=${trendCtx}
+Definitions:
+
+TRUE DIAMOND:
+- Could realistically be used as a serious startup/company brand
+- Broad buyer pool
+- Strong commercial intent
+- Easy to pronounce
+- Easy to spell
+- Memorable after hearing once
+- Looks premium on a pitch deck, app icon, billboard, and investor memo
+- Has realistic $2,000+ resale potential
+- Could plausibly reach much higher value if the right buyer exists
+- Must feel rare, not generated
+- Should usually be one of:
+  1. short recognizable one-word .com
+  2. smooth 5-8 letter coined brandable
+  3. ultra-clear category killer compound
+  4. high-commercial SaaS/AI/fintech/security/health/data name
+
+STRONG WATCHLIST:
+- Good name
+- Could sell or be used by a startup
+- But not rare/premium enough for diamond
+- Score 75-87
+
+DECENT:
+- Usable domain
+- Some buyer/use-case exists
+- But niche, ordinary, weak phrase, generated feel, or limited buyer pool
+- Could sell low/mid retail
+- Score 60-74
+
+SKIP:
+- Awkward
+- Low buyer pool
+- Weak phrase
+- Trademark/adult/spam/legal risk
+- Needs explanation
+- Sounds like random wordlist output
+- Score below 60
+
+Critical rules:
+- Two real words do NOT make a diamond.
+- A domain must not be diamond just because it is short.
+- A domain must not be diamond just because it is pronounceable.
+- A domain must not be diamond just because it contains a tech noun.
+- Generated combos like linetile, skilluser, modetab, tagruntime, ratiotube, sheetpanel should usually be DECENT or SKIP, not diamond.
+- Niche construction/UI/internal-tool words should not be diamond unless the phrase is a major commercial category.
+- If buyer pool is unclear, max score is 65.
+- If it sounds generated, max score is 70.
+- If it is niche but usable, max score is 75.
+- If trademark risk is high, max score is 20.
+- If adult/spam/legal-negative risk exists, max score is 25.
+- Only exceptional names should score 88+.
+- Most generated domains should score below 60.
+
+Evaluate these factors:
+1. Length
+2. Pronunciation
+3. Spelling clarity
+4. Memorability
+5. Startup/company feel
+6. Commercial intent
+7. Buyer pool
+8. Trend relevance
+9. Category ownership
+10. Resale potential
+11. Trademark risk
+12. Negative/adult/spam risk
+13. Whether it sounds generated
+14. Whether it can become a unicorn brand
 
 Return ONLY valid JSON:
 {
-  "score": <0-100>,
-  "verdict": "investment_grade" | "decent" | "skip",
-  "reason": "<one sentence>",
-  "top_factors": ["<up to 4 short factors>"]
+  "score": 0,
+  "verdict": "diamond" | "strong_watchlist" | "decent" | "skip",
+  "isDiamond": false,
+  "estimatedRetailUsd": {
+    "low": 0,
+    "high": 0
+  },
+  "buyerTypes": ["..."],
+  "reason": "one clear sentence",
+  "top_factors": ["factor1", "factor2", "factor3"],
+  "red_flags": ["flag1", "flag2"]
 }`;
 
   try {
-    const result = await chatJSON<{
-      score?: number;
-      verdict?: string;
-      reason?: string;
-      top_factors?: string[];
-    }>(
+    const result = await chatJSON<RawEvaluation>(
       [
-        { role: "system", content: "You are a strict professional domain investment evaluator. Most domains fail. Output only valid JSON." },
-        { role: "user", content: prompt },
+        { role: "system", content: EVALUATOR_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
       ],
-      { temperature: 0.2, timeoutMs: 20000 },
+      { temperature: 0.1, timeoutMs: 25000, model: evaluatorModel() },
     );
 
-    if (!result || typeof result.score !== "number") return null;
+    if (!result || typeof result.score !== "number") return local;
 
-    const score = Math.max(0, Math.min(100, Math.round(result.score)));
-    const verdict = String(result.verdict ?? "").trim().toLowerCase();
-    let normalizedVerdict: "investment_grade" | "decent" | "skip" = "skip";
-    if (verdict === "diamond" || verdict === "investment_grade") {
-      normalizedVerdict = "investment_grade";
-    } else if (verdict === "decent") {
-      normalizedVerdict = "decent";
+    // ── Post-processing: clamp + deterministic hard caps. Never trust the model
+    //    blindly when it contradicts a hard cap. ──────────────────────────────
+    const segments = meaningfulSegments(lower);
+    const tm = checkTrademarkRisk(lower);
+    const neg = checkNegativeRisk(lower);
+    const recognizable = isRecognizableWord(lower);
+    const highValueCategory = isHighValueCategoryPhrase(lower);
+    const weakNoun = hasWeakGenericNoun(lower, segments);
+
+    let score = clampInt(result.score, 0, 100);
+
+    if (tld.toLowerCase() !== "com") score = Math.min(score, 80);
+    if (weakNoun && !highValueCategory) {
+      score = Math.min(score, segments && segments.length >= 2 ? 65 : 75);
     }
-    const isDiamond = normalizedVerdict === "investment_grade" && score >= DIAMOND_THRESHOLD;
+    // "Two real words do NOT make a diamond": a clean multi-word split that is
+    // neither a recognized high-value category nor a single recognizable word can
+    // never reach diamond grade — exactly the linetile/modetab/ratiotube case.
+    const looksGenerated =
+      !!segments && segments.length >= 2 && !highValueCategory && !recognizable;
+    if (looksGenerated) score = Math.min(score, DIAMOND_THRESHOLD - 1);
+    if (neg.flagged) score = Math.min(score, 25);
+    if (tm.risk === "high") score = Math.min(score, 20);
+    else if (tm.risk === "medium") score = Math.min(score, 60);
+
+    const bandVerdict = verdictForScore(score);
+    const modelVerdict = normalizeVerdict(result.verdict) ?? bandVerdict;
+    const verdict = stricterVerdict(bandVerdict, modelVerdict);
+    const isDiamond = score >= DIAMOND_THRESHOLD && verdict === "diamond";
+
+    const factors = sanitizeStrings(result.top_factors, 5);
+    const redFlags = sanitizeStrings(result.red_flags, 5);
+    const buyerTypes = sanitizeStrings(result.buyerTypes, 6);
 
     return {
       score,
+      verdict,
       isDiamond,
-      reason: String(result.reason ?? "").slice(0, 300),
-      factors: (result.top_factors ?? []).map((f) => String(f).slice(0, 100)),
+      reason: String(result.reason || local.reason).slice(0, 300),
+      factors: factors.length ? factors : local.factors,
+      estimatedRetailUsd: sanitizeRetail(result.estimatedRetailUsd),
+      buyerTypes,
+      redFlags,
     };
   } catch (err) {
     logger.debug({ err, name }, "LLM diamond evaluation failed");
-    return null;
+    return local;
   }
 }
 
@@ -182,14 +437,39 @@ export async function alertDiamond(
   evaluation: DiamondEvaluation,
   dnsEvidence: string,
 ): Promise<void> {
+  // Hard guard: alertDiamond is the ONLY Telegram path, and it fires ONLY for a
+  // confirmed diamond. Anything else (decent / strong_watchlist / skip / pending)
+  // must never produce an alert.
+  if (
+    !evaluation.isDiamond ||
+    evaluation.verdict !== "diamond" ||
+    evaluation.score < DIAMOND_THRESHOLD
+  ) {
+    logger.debug(
+      { name, score: evaluation.score, verdict: evaluation.verdict },
+      "alertDiamond suppressed — not a confirmed diamond",
+    );
+    return;
+  }
+
   const fqdn = `${name}.${tld}`;
+  const retail = evaluation.estimatedRetailUsd;
   const lines = [
     `💎 <b>DIAMOND FOUND — ${fqdn.toUpperCase()}</b>`,
     ``,
-    `🤖 <b>AI Score:</b> ${evaluation.score}/100`,
+    `🤖 <b>AI Score:</b> ${evaluation.score}/100  ·  <b>Verdict:</b> ${verdictLabel(evaluation.verdict)}`,
     `📝 <b>Why it's a diamond:</b> ${evaluation.reason}`,
     evaluation.factors.length > 0
       ? `✅ <b>Key factors:</b> ${evaluation.factors.join(" · ")}`
+      : "",
+    retail
+      ? `💰 <b>Est. retail:</b> $${retail.low.toLocaleString()}–$${retail.high.toLocaleString()}`
+      : "",
+    evaluation.buyerTypes && evaluation.buyerTypes.length > 0
+      ? `🧑‍💼 <b>Likely buyers:</b> ${evaluation.buyerTypes.join(", ")}`
+      : "",
+    evaluation.redFlags && evaluation.redFlags.length > 0
+      ? `⚠️ <b>Watch-outs:</b> ${evaluation.redFlags.join(", ")}`
       : "",
     ``,
     `<b>📡 Register now (before someone else does):</b>`,

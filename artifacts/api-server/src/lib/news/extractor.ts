@@ -61,10 +61,22 @@ function isHighSignal(ev: NormalizedEvent, funding: number): boolean {
 }
 
 const VALID_KEYWORD = /^[a-z]+(?: [a-z]+)?$/; // single word or two-word phrase
+// Boilerplate / journalistic scaffolding that must never become a domain seed.
+// A keyword is rejected if ANY of its words is in this set (so "ai platform",
+// "series a", "venture capital" are all dropped, while "ai agent",
+// "cloud security", "workflow automation" survive).
 const BRANDY_STOPWORDS = new Set([
+  // corporate / legal entity noise
   "inc", "corp", "ltd", "llc", "labs", "lab", "technologies", "technology",
-  "company", "startup", "founder", "ceo", "round", "series", "raises", "raised",
-  "funding", "million", "billion", "venture", "capital", "investors",
+  "company", "companies", "founder", "ceo", "firm", "firms",
+  // funding boilerplate
+  "round", "rounds", "series", "raise", "raises", "raised", "raising",
+  "funding", "funded", "million", "billion", "venture", "ventures", "capital",
+  "investor", "investors", "seed",
+  // generic non-distinctive product words the user flagged
+  "startup", "startups", "platform", "platforms", "software", "solution",
+  "solutions", "plan", "plans", "report", "reports", "announce", "announces",
+  "announced", "launch", "launches", "launched", "news",
 ]);
 
 /**
@@ -80,12 +92,21 @@ async function llmExtractKeywords(
   const fundingNote =
     funding > 0 ? `\nDetected funding amount: ~$${Math.round(funding / 1_000_000)}M.` : "";
 
-  const prompt = `You are a domain-investment analyst. Read this tech/science/funding news item and extract GENERIC, brandable product or technology keywords that could become valuable .com domains in 2026.
+  const prompt = `You are a domain-investment analyst. Read this tech/science/funding news item and extract GENERIC, brandable product or technology CONCEPTS that could become valuable .com domains in 2026.
 
 STRICT RULES:
 - REJECT any company name, brand name, product trademark or person name (trademark/UDRP risk).
-- Return only GENERIC descriptive terms (e.g. "fusion battery", "gene therapy", "ai agent", "hearing aid").
+- REJECT news/funding boilerplate and non-distinctive filler. NEVER return any of:
+  funding, startup, startups, raises, raised, million, billion, series a, series b,
+  venture capital, venture, capital, investor, round, seed, company, companies,
+  platform, technology, software, solution, solutions, app, tool, news, report.
+- Return only GENERIC descriptive CONCEPTS — the underlying technology or product
+  category, NOT the act of raising money. Good examples:
+  "ai agent", "cloud security", "workflow automation", "inference engine",
+  "voice ai", "fusion battery", "gene therapy", "robot vision", "quantum chip",
+  "developer workflow", "identity verification".
 - Each keyword: lowercase, 1 or 2 words max, no punctuation, commercially meaningful.
+  If a keyword is just a funding/boilerplate word, drop it instead of returning it.
 - Pick the best category from: ai, quantum, biotech, green_energy, space_tech.
 
 NEWS TITLE: ${ev.title}
