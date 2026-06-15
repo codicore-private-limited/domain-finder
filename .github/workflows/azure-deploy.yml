@@ -10,12 +10,16 @@
 #      - NPM_CONFIG_PRODUCTION = false
 #      - PORT = 8080
 #      - DATABASE_URL = <your db connection string>
+#      - DIAMOND_THRESHOLD = 88
+#      - GITHUB_MODELS_TOKEN = <your key>   # or GROQ_API_KEY below
 #      - GROQ_API_KEY = <your key>
 #      - GODADDY_API_KEY = <your key>
 #      - TELEGRAM_BOT_TOKEN = <your token>
+#      - TELEGRAM_CHAT_ID = <your chat id>
 #
 # 2. Go to Azure Portal → your App Service → Settings → Configuration → General settings
-#    Set Startup Command:  node --enable-source-maps --max-old-space-size=460 artifacts/api-server/dist/index.mjs
+#    Set Startup Command:  pnpm run start
+#    This runs Drizzle schema sync first, then starts the bundled API server.
 #
 # 3. Download Publish Profile:
 #    Azure Portal → your App Service → Overview → "Download publish profile"
@@ -102,6 +106,12 @@ jobs:
           if [ -f "lib/db/drizzle.config.ts" ]; then
             mkdir -p deploy-package/lib/db
             cp lib/db/drizzle.config.ts deploy-package/lib/db/
+          fi
+          # Copy DB schema source so the root `pnpm run start` command can run
+          # `drizzle-kit push` against the production database before boot.
+          if [ -d "lib/db/src" ]; then
+            mkdir -p deploy-package/lib/db/src
+            cp -r lib/db/src/. deploy-package/lib/db/src/
           fi
           # Copy compiled db files
           if [ -d "lib/db/dist" ]; then
