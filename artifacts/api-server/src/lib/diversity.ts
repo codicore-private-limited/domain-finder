@@ -86,7 +86,7 @@ export function splitStem(
   secondWords?: Set<string>,
 ): { prefix: string; suffix: string } {
   const n = name.length;
-  if (n <= 3) return { prefix: name, suffix: name };
+  if (n <= 3) return { prefix: name, suffix: "" };
 
   // Try to split on a known first-word boundary (longest match wins)
   if (firstWords) {

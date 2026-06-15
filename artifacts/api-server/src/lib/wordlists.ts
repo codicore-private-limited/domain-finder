@@ -619,7 +619,8 @@ function _vnReject(s: string): boolean {
  * diversity-capped so no single first-word or second-word stem can flood the
  * pool with hundreds of near-identical permutations (lane*, mode*, vote* …).
  * The per-stem cap is controlled by DIVERSITY_PREFIX_CAP / DIVERSITY_SUFFIX_CAP
- * environment variables (default 25 each).
+ * environment variables (default 25 each) and applied via capVerbNounPool()
+ * from diversity.ts.
  */
 export const VERB_NOUN_POOL: string[] = (() => {
   const seen = new Set<string>();

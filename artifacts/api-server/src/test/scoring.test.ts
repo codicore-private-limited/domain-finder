@@ -2,7 +2,7 @@
  * Unit tests for the domain scoring, filtering, and diversity-control pipeline.
  *
  * Run with:
- *   pnpm --filter @workspace/api-server run test
+ *   pnpm -F api-server test
  *
  * Uses Node's built-in `node:test` runner (Node ≥ 18) via tsx for TypeScript.
  */
@@ -136,7 +136,7 @@ describe("High-value phrase recognition", () => {
       assert.equal(
         isHighValueCategoryPhrase(name),
         true,
-        `"${name}" should be recognised as a high-value category phrase`,
+        `"${name}" should be recognized as a high-value category phrase`,
       );
     });
   }
@@ -160,7 +160,7 @@ describe("High-value phrase recognition", () => {
 describe("Word segmentation", () => {
   test('meaningfulSegments("setuser") returns ["setuser"] (recognized real phrase)', () => {
     // "setuser" is in the real-phrase corpus, so it is returned as a single
-    // element (phrase recognised whole, no split needed).
+    // element (phrase recognized whole, no split needed).
     const seg = meaningfulSegments("setuser");
     assert.deepEqual(seg, ["setuser"]);
   });
