@@ -4,6 +4,7 @@ import {
   hasWeakGenericNoun, isHighValueCategoryPhrase,
 } from "./wordlists";
 import { checkTrademarkRisk, checkNegativeRisk } from "./trademark";
+import { WEAK_NOUN_MAX_SCORE, WEAK_NOUN_SINGLE_MAX_SCORE } from "./config";
 
 /** High-frequency common words (for the "every segment is recognizable" bonus). */
 let _commonSet: Set<string> | null = null;
@@ -351,9 +352,9 @@ export function scoreCandidate(input: ScoreInput): ScoreOutput {
     // Generated two-word combo carrying a weak filler noun (modetab, ratiotube,
     // sheetpanel) — decent/watchlist at best, never premium.
     if (seg.length >= 2 && weakNoun && !highValueCategory) {
-      value = Math.min(value, 65);
+      value = Math.min(value, WEAK_NOUN_MAX_SCORE);
     } else if (weakNoun && !highValueCategory) {
-      value = Math.min(value, 75);
+      value = Math.min(value, WEAK_NOUN_SINGLE_MAX_SCORE);
     }
 
     // Niche fused combo: neither a recognizable single word nor a known
