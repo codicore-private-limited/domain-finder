@@ -11,7 +11,6 @@
 import { COMMON_WORDS_RAW } from "./common-words";
 import { ALL_WORDS_RAW } from "./all-words";
 import { REAL_PHRASES_RAW } from "./phrases";
-import { capVerbNounPool } from "./diversity";
 
 // ─────────────────────────────────────────────
 // WORD1 (first word): Adjectives, verbs, descriptors
@@ -615,16 +614,12 @@ function _vnReject(s: string): boolean {
 }
 
 /**
- * The full Verb+Noun (and Noun+Noun) matrix, quality-filtered and
- * diversity-capped so no single first-word or second-word stem can flood the
- * pool with hundreds of near-identical permutations (lane*, mode*, vote* …).
- * The per-stem cap is controlled by DIVERSITY_PREFIX_CAP / DIVERSITY_SUFFIX_CAP
- * environment variables (default 25 each) and applied via capVerbNounPool()
- * from diversity.ts.
+ * The full Verb+Noun (and Noun+Noun) matrix, quality-filtered. This is the big,
+ * fresh pool of setuser-style names the hunter sweeps for available .com.
  */
 export const VERB_NOUN_POOL: string[] = (() => {
   const seen = new Set<string>();
-  const raw: string[] = [];
+  const out: string[] = [];
   const tryAdd = (a: string, b: string) => {
     if (a === b) return;
     const name = a + b;
@@ -632,16 +627,13 @@ export const VERB_NOUN_POOL: string[] = (() => {
     if (seen.has(name)) return;
     if (_vnReject(name)) return;
     seen.add(name);
-    raw.push(name);
+    out.push(name);
   };
   // 1) Verb + Noun (the core SetUser pattern): setuser, getdata, paycloud …
   for (const v of VN_ACTION_VERBS) for (const n of VN_TECH_NOUNS) tryAdd(v, n);
   // 2) Noun + Noun (dataflow, codebase, paywall, teamhub …) — also genuine.
   for (const a of VN_TECH_NOUNS) for (const b of VN_TECH_NOUNS) tryAdd(a, b);
-  // Apply diversity cap: no single verb/noun stem dominates the pool.
-  const verbSet = new Set(VN_ACTION_VERBS);
-  const nounSet = new Set(VN_TECH_NOUNS);
-  return capVerbNounPool(raw, verbSet, nounSet);
+  return out;
 })();
 
 let _verbNounSet: Set<string> | null = null;

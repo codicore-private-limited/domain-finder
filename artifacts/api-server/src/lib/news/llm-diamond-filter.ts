@@ -10,7 +10,6 @@ import {
   meaningfulSegments,
   phraseDemand,
 } from "../wordlists";
-import { DIAMOND_THRESHOLD as CONFIG_DIAMOND_THRESHOLD } from "../config";
 
 /**
  * Strict premium-.com diamond gate.
@@ -46,8 +45,11 @@ function clampInt(value: number, min: number, max: number): number {
 
 // Only names scoring this high get diamond treatment. DIAMOND_THRESHOLD is the
 // primary env; legacy AI_DIAMOND_THRESHOLD is still honored. Default 88.
-// Re-exported for consumers that previously imported from this file.
-export const DIAMOND_THRESHOLD = CONFIG_DIAMOND_THRESHOLD;
+export const DIAMOND_THRESHOLD = (() => {
+  const raw = process.env.DIAMOND_THRESHOLD ?? process.env.AI_DIAMOND_THRESHOLD;
+  const value = Number(raw);
+  return Number.isFinite(value) ? clampInt(value, 60, 100) : 88;
+})();
 
 const VERDICT_RANK: Record<DiamondVerdict, number> = {
   skip: 0,
