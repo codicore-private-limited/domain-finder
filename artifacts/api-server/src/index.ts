@@ -4,7 +4,7 @@ import { hunter } from "./lib/hunter";
 import { newsIngest } from "./lib/news/ingest";
 import { expiringMonitor } from "./lib/news/expiring";
 import { workerRegistry } from "./lib/workers/registry";
-import { db, discoveriesTable } from "@workspace/db";
+import { db, discoveriesTable, ensureSchema } from "@workspace/db";
 import { desc } from "drizzle-orm";
 
 // Keep the process alive when background loops (hunter / news ingest /
@@ -43,10 +43,17 @@ const server = app.listen(port, "0.0.0.0", (err) => {
   // Auto-arm the hunter on boot so the live page is always producing diamonds.
   // Defer briefly so the server is fully up before history loads.
   setTimeout(() => {
-    void hunter
-      .start()
-      .then(() => logger.info({}, "Hunter auto-armed"))
-      .catch((err) => logger.error({ err }, "Hunter auto-arm failed"));
+    // Bring the discoveries table up to date (adds missing diamond/viewed
+    // columns on legacy production DBs) before the hunter loads history.
+    void ensureSchema()
+      .then(() => logger.info({}, "Schema ensured"))
+      .catch((err) => logger.error({ err }, "Schema ensure failed"))
+      .finally(() => {
+        void hunter
+          .start()
+          .then(() => logger.info({}, "Hunter auto-armed"))
+          .catch((err) => logger.error({ err }, "Hunter auto-arm failed"));
+      });
     // Kick off a one-shot RDAP re-verification of legacy diamonds in background.
     void hunter.runLegacyCleanup();
 

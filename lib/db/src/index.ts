@@ -41,4 +41,21 @@ pool.on("error", (err) => {
 
 export const db = drizzle(pool, { schema });
 
+// Idempotent boot-time schema guard. Production databases that predate the
+// LLM diamond columns are missing is_diamond/diamond_score/diamond_reason/
+// viewed_at, which makes every /discoveries query fail. Running these here at
+// startup (where DB connectivity is known-good) brings the table up to date
+// without needing external/private-network access. All statements are
+// IF NOT EXISTS, so this is safe to run on every boot.
+export async function ensureSchema(): Promise<void> {
+  await pool.query(`
+    ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS is_diamond boolean NOT NULL DEFAULT false;
+    ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS diamond_score numeric(5,2);
+    ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS diamond_reason text;
+    ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS viewed_at timestamptz;
+    CREATE INDEX IF NOT EXISTS discoveries_diamond_idx ON discoveries (is_diamond);
+    CREATE INDEX IF NOT EXISTS discoveries_viewed_idx ON discoveries (viewed_at);
+  `);
+}
+
 export * from "./schema";
