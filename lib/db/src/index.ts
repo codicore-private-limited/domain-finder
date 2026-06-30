@@ -48,6 +48,7 @@ export const db = drizzle(pool, { schema });
 // without needing external/private-network access. All statements are
 // IF NOT EXISTS, so this is safe to run on every boot.
 export async function ensureSchema(): Promise<void> {
+  // 1) Add columns the current code expects (safe if they already exist).
   await pool.query(`
     ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS is_diamond boolean NOT NULL DEFAULT false;
     ALTER TABLE discoveries ADD COLUMN IF NOT EXISTS diamond_score numeric(5,2);
@@ -56,6 +57,52 @@ export async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS discoveries_diamond_idx ON discoveries (is_diamond);
     CREATE INDEX IF NOT EXISTS discoveries_viewed_idx ON discoveries (viewed_at);
   `);
+
+  // 2) A legacy production table can carry extra NOT NULL columns (from an
+  //    older schema) that the current INSERT never fills. Every insert then
+  //    fails with "null value in column ... violates not-null constraint",
+  //    so available domains are found but NEVER saved (discoveries stays 0).
+  //    Relax NOT NULL on any required column the current code does not write,
+  //    so inserts succeed. Purely a constraint relaxation — no data is lost.
+  await pool.query(`
+    DO $$
+    DECLARE col record;
+    BEGIN
+      FOR col IN
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'discoveries'
+          AND is_nullable = 'NO'
+          AND column_default IS NULL
+          AND column_name NOT IN (
+            'id','fqdn','name','tld','category','strategy','pattern','length',
+            'value_score','memorability','radio_test','rationale','dns_evidence',
+            'is_diamond','discovered_at'
+          )
+      LOOP
+        EXECUTE format('ALTER TABLE discoveries ALTER COLUMN %I DROP NOT NULL', col.column_name);
+        RAISE NOTICE 'ensureSchema: dropped NOT NULL on legacy column %', col.column_name;
+      END LOOP;
+    END $$;
+  `);
+
+  // 3) Log the actual column layout so production schema drift is visible in
+  //    the boot logs (helps diagnose any remaining insert failures).
+  try {
+    const res = await pool.query(
+      `SELECT column_name, is_nullable, data_type
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'discoveries'
+       ORDER BY ordinal_position`,
+    );
+    const cols = res.rows
+      .map((r) => `${r.column_name}${r.is_nullable === "NO" ? "*" : ""}`)
+      .join(", ");
+    console.log(`[db] discoveries columns (*=NOT NULL): ${cols}`);
+  } catch (err) {
+    console.error("[db] could not introspect discoveries columns:", err);
+  }
 }
 
 export * from "./schema";
